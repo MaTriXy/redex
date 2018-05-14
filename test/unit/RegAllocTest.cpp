@@ -21,6 +21,7 @@
 #include "LiveRange.h"
 #include "Liveness.h"
 #include "OpcodeList.h"
+#include "RedexTest.h"
 #include "RegAlloc.h"
 #include "RegisterType.h"
 #include "Show.h"
@@ -30,16 +31,12 @@
 
 using namespace regalloc;
 
+struct RegAllocTest : public RedexTest {};
+
 // for nicer gtest error messages
 std::ostream& operator<<(std::ostream& os, const IRInstruction& to_show) {
   return os << show(&to_show);
 }
-
-struct RegAllocTest : testing::Test {
-  RegAllocTest() { g_redex = new RedexContext(); }
-
-  ~RegAllocTest() { delete g_redex; }
-};
 
 /*
  * Check that we pick the most pessimistic move instruction (of the right type)
@@ -100,7 +97,7 @@ TEST_F(RegAllocTest, LiveRangeSingleBlock) {
   code->set_registers_size(1);
 
   code->build_cfg();
-  live_range::renumber_registers(code.get());
+  live_range::renumber_registers(code.get(), /* width_aware */ false);
 
   auto expected_code = assembler::ircode_from_string(R"(
     (
@@ -132,14 +129,14 @@ TEST_F(RegAllocTest, LiveRange) {
      (check-cast v0 "Ljava/lang/Object;")
      (move-result-pseudo-object v0)
 
-     :if-true-label
+     (:if-true-label)
      (check-cast v0 "Ljava/lang/Object;")
      (move-result-pseudo-object v0)
     )
 )");
 
   code->build_cfg();
-  live_range::renumber_registers(code.get());
+  live_range::renumber_registers(code.get(), /* width_aware */ false);
 
   auto expected_code = assembler::ircode_from_string(R"(
     (
@@ -156,7 +153,7 @@ TEST_F(RegAllocTest, LiveRange) {
      (check-cast v4 "Ljava/lang/Object;")
      (move-result-pseudo-object v2)
 
-     :if-true-label
+     (:if-true-label)
      (check-cast v2 "Ljava/lang/Object;")
      (move-result-pseudo-object v5)
     )
@@ -164,6 +161,38 @@ TEST_F(RegAllocTest, LiveRange) {
   EXPECT_EQ(assembler::to_s_expr(code.get()),
             assembler::to_s_expr(expected_code.get()));
   EXPECT_EQ(code->get_registers_size(), 6);
+}
+
+TEST_F(RegAllocTest, WidthAwareLiveRange) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (const v0 0)
+     (const-wide v0 0)
+     (sput-wide v0 "LFoo;.bar:I")
+     (new-instance "Ljava/lang/Object;")
+     (move-result-pseudo-object v0)
+     (check-cast v0 "Ljava/lang/Object;")
+     (move-result-pseudo-object v0)
+    )
+)");
+
+  code->build_cfg();
+  live_range::renumber_registers(code.get(), /* width_aware */ true);
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (const v0 0)
+     (const-wide v1 0)
+     (sput-wide v1 "LFoo;.bar:I")
+     (new-instance "Ljava/lang/Object;")
+     (move-result-pseudo-object v3) ; skip v2 since we have a wide value in v1
+     (check-cast v3 "Ljava/lang/Object;")
+     (move-result-pseudo-object v4)
+    )
+)");
+  EXPECT_EQ(assembler::to_s_expr(code.get()),
+            assembler::to_s_expr(expected_code.get()));
+  EXPECT_EQ(code->get_registers_size(), 5);
 }
 
 TEST_F(RegAllocTest, VirtualRegistersFile) {
@@ -572,7 +601,6 @@ TEST_F(RegAllocTest, SelectAliasedRange) {
      (return-void)
     )
 )");
-  code->set_registers_size(2);
   code->build_cfg();
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
@@ -596,7 +624,59 @@ TEST_F(RegAllocTest, SelectAliasedRange) {
   allocator.select_ranges(
       code.get(), ig, range_set, &reg_transform, &spill_plan);
 
-  EXPECT_EQ(spill_plan.range_spills.at(invoke), std::unordered_set<reg_t>{0});
+  EXPECT_EQ(spill_plan.range_spills.at(invoke), std::vector<size_t>{1});
+
+  allocator.spill(ig, spill_plan, range_set, code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (const v0 0)
+     (move v1 v0)
+     (invoke-static (v0 v1) "Lfoo;.baz:(II)V")
+     (return-void)
+    )
+)");
+
+  EXPECT_EQ(assembler::to_s_expr(code.get()),
+            assembler::to_s_expr(expected_code.get()));
+}
+
+/*
+ * If two ranges use the same symregs in the same order, we should try and map
+ * them to the same vregs.
+ */
+TEST_F(RegAllocTest, AlignRanges) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (const v0 0)
+     (const v1 1)
+     (invoke-static (v0 v1) "Lfoo;.baz:(II)V")
+     (invoke-static (v0 v1) "Lfoo;.baz:(II)V")
+     (return-void)
+    )
+)");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  cfg.calculate_exit_block();
+  LivenessFixpointIterator fixpoint_iter(cfg);
+  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+
+  RangeSet range_set;
+  for (auto& mie : InstructionIterable(code.get())) {
+    if (mie.insn->opcode() == OPCODE_INVOKE_STATIC) {
+      range_set.emplace(mie.insn);
+    }
+  }
+  interference::Graph ig = interference::build_graph(
+      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+  graph_coloring::SpillPlan spill_plan;
+  graph_coloring::RegisterTransform reg_transform;
+  graph_coloring::Allocator allocator;
+  allocator.select_ranges(
+      code.get(), ig, range_set, &reg_transform, &spill_plan);
+
+  EXPECT_EQ(reg_transform.map, (transform::RegMap{{0, 0}, {1, 1}}));
+  EXPECT_EQ(reg_transform.size, 2);
+  EXPECT_TRUE(spill_plan.range_spills.empty());
 }
 
 TEST_F(RegAllocTest, Spill) {
@@ -629,9 +709,8 @@ TEST_F(RegAllocTest, Spill) {
     {1, 16},
     {2, 256},
   };
-  std::unordered_set<reg_t> new_temps;
   graph_coloring::Allocator allocator;
-  allocator.spill(ig, spill_plan, range_set, code.get(), &new_temps);
+  allocator.spill(ig, spill_plan, range_set, code.get());
 
   auto expected_code = assembler::ircode_from_string(R"(
     (
@@ -649,6 +728,49 @@ TEST_F(RegAllocTest, Spill) {
 
      (move v7 v2)
      (return v7)
+    )
+)");
+  EXPECT_EQ(assembler::to_s_expr(code.get()),
+            assembler::to_s_expr(expected_code.get()));
+}
+
+TEST_F(RegAllocTest, NoSpillSingleArgInvokes) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (const v0 0)
+     (neg-int v1 v0) ; neg-int's operands are limited to 4 bits
+     (invoke-static (v0) "Lfoo;.baz:(I)V") ; this can always be converted to
+                                           ; an invoke-range, so it should not
+                                           ; get spilled
+     (return-void)
+    )
+)");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  cfg.calculate_exit_block();
+  LivenessFixpointIterator fixpoint_iter(cfg);
+  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+
+  RangeSet range_set;
+  interference::Graph ig = interference::build_graph(
+      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+
+  SplitPlan split_plan;
+  graph_coloring::SpillPlan spill_plan;
+  spill_plan.global_spills = std::unordered_map<reg_t, reg_t> {
+    {0, 16},
+    {1, 0},
+  };
+  graph_coloring::Allocator allocator;
+  allocator.spill(ig, spill_plan, range_set, code.get());
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (const v0 0)
+     (move v2 v0)
+     (neg-int v1 v2)
+     (invoke-static (v0) "Lfoo;.baz:(I)V")
+     (return-void)
     )
 )");
   EXPECT_EQ(assembler::to_s_expr(code.get()),
@@ -777,8 +899,7 @@ TEST_F(RegAllocTest, Split) {
       std::unordered_map<reg_t, std::unordered_set<reg_t>>{
           {1, std::unordered_set<reg_t>{0}}};
   graph_coloring::Allocator allocator;
-  std::unordered_set<reg_t> new_temps;
-  allocator.spill(ig, spill_plan, range_set, code.get(), &new_temps);
+  allocator.spill(ig, spill_plan, range_set, code.get());
   split(fixpoint_iter, split_plan, split_costs, ig, code.get());
 
   auto expected_code = assembler::ircode_from_string(R"(
@@ -823,9 +944,8 @@ TEST_F(RegAllocTest, ParamFirstUse) {
 
   graph_coloring::SpillPlan spill_plan;
   spill_plan.param_spills = std::unordered_set<reg_t>{0, 1};
-  std::unordered_set<reg_t> new_temps;
   graph_coloring::Allocator allocator;
-  allocator.split_params(ig, spill_plan.param_spills, code.get(), &new_temps);
+  allocator.split_params(ig, spill_plan.param_spills, code.get());
 
   auto expected_code = assembler::ircode_from_string(R"(
     (

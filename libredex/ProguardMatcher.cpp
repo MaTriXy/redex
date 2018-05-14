@@ -311,7 +311,7 @@ void keep_fields(RegexMap& regex_map,
 }
 
 std::string field_regex(const MemberSpecification& field_spec) {
-  std::stringstream ss;
+  std::ostringstream ss;
   ss << proguard_parser::form_member_regex(field_spec.name);
   ss << "\\:";
   ss << proguard_parser::form_type_regex(field_spec.descriptor);
@@ -749,7 +749,7 @@ void process_keep(
 
   // We only parallelize if keep_rule needs to be applied to all classes.
   auto wq = workqueue_foreach<KeepSpec*>(
-      [&keep_processor, &process_single_keep, &classes](KeepSpec* keep_rule) {
+      [&process_single_keep, &classes](KeepSpec* keep_rule) {
         RegexMap regex_map;
         ClassMatcher class_match(*keep_rule);
 

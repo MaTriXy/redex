@@ -95,8 +95,8 @@ void update_refs(Scope& scope, DexFieldManager& field_name_mapping,
   std::unordered_map<DexFieldRef*, DexField*> f_ref_def_cache;
   std::unordered_map<DexMethodRef*, DexMethod*> m_ref_def_cache;
   walk::opcodes(scope,
-    [](DexMethod*) { return true; },
     [&](DexMethod*, IRInstruction* instr) {
+      auto op = instr->opcode();
       if (instr->has_field()) {
         DexFieldRef* field_ref = instr->get_field();
         if (field_ref->is_def()) return;
@@ -106,7 +106,14 @@ void update_refs(Scope& scope, DexFieldManager& field_name_mapping,
           TRACE(OBFUSCATE, 4, "Found a ref to fixup %s", SHOW(field_ref));
           instr->set_field(field_def);
         }
-      } else if (instr->has_method()) {
+      } else if (instr->has_method() &&
+                 (is_invoke_direct(op) || is_invoke_static(op))) {
+        // We only check invoke-direct and invoke-static because the method def
+        // we've renamed is a `dmethod`, not a `vmethod`.
+        //
+        // If we attempted to resolve invoke-virtual refs here, we would
+        // conflate this virtual ref with a direct def that happens to have the
+        // same name but isn't actually inherited.
         DexMethodRef* method_ref = instr->get_method();
         if (method_ref->is_def()) return;
         DexMethod* method_def =
@@ -151,7 +158,7 @@ void obfuscate(Scope& scope, RenameStats& stats) {
         contains_renamable_elem(cls->get_dmethods(), method_name_manager);
     if (operate_on_ifields || operate_on_sfields) {
       FieldObfuscationState f_ob_state;
-      SimpleNameGenerator<DexField*> simple_name_generator(
+      FieldNameGenerator field_name_generator(
           f_ob_state.ids_to_avoid, f_ob_state.used_ids);
       StaticFieldNameGenerator static_name_generator(
           f_ob_state.ids_to_avoid, f_ob_state.used_ids);
@@ -166,7 +173,7 @@ void obfuscate(Scope& scope, RenameStats& stats) {
         obfuscate_elems(
             FieldRenamingContext(cls->get_ifields(),
                 f_ob_state.ids_to_avoid,
-                simple_name_generator, false),
+                field_name_generator, false),
             field_name_manager);
       }
       if (operate_on_sfields) {
@@ -178,7 +185,6 @@ void obfuscate(Scope& scope, RenameStats& stats) {
       }
 
       // Obfu private fields
-      f_ob_state.ids_to_avoid.clear();
       f_ob_state.populate_ids_to_avoid(cls, field_name_manager, false, ch);
 
       // Keep this for all public ids in the class (they shouldn't conflict)
@@ -186,7 +192,7 @@ void obfuscate(Scope& scope, RenameStats& stats) {
         obfuscate_elems(
             FieldRenamingContext(cls->get_ifields(),
             f_ob_state.ids_to_avoid,
-            simple_name_generator, true),
+            field_name_generator, true),
         field_name_manager);
       }
       if (operate_on_sfields) {
@@ -222,7 +228,6 @@ void obfuscate(Scope& scope, RenameStats& stats) {
           method_name_manager);
 
       // Obfu private methods
-      m_ob_state.ids_to_avoid.clear();
       m_ob_state.populate_ids_to_avoid(cls, method_name_manager, false, ch);
 
       obfuscate_elems(

@@ -14,36 +14,26 @@
 #include "DexClass.h"
 #include "DexLoader.h"
 #include "IRCode.h"
+#include "RedexTest.h"
 
 using ResourceFiles = std::unordered_map<std::string, std::string>;
 ResourceFiles decode_resource_paths(const char* location, const char* suffix);
 
-struct Verify : testing::Test {
-  Verify() {
-    g_redex = new RedexContext();
-  }
-  ~Verify() {
-    delete g_redex;
-  }
-};
-
-struct PreVerify : public Verify {
+struct PreVerify : public RedexTest {
   DexClasses classes;
   ResourceFiles resources;
   PreVerify()
-      : Verify(),
-        classes(load_classes_from_dex(std::getenv("dex_pre"),
+      : classes(load_classes_from_dex(std::getenv("dex_pre"),
                                       /* balloon */ false)),
         resources(decode_resource_paths(std::getenv("extracted_resources"),
                                         "pre")) {}
 };
 
-struct PostVerify : public Verify {
+struct PostVerify : public RedexTest {
   DexClasses classes;
   ResourceFiles resources;
   PostVerify()
-      : Verify(),
-        classes(load_classes_from_dex(std::getenv("dex_post"),
+      : classes(load_classes_from_dex(std::getenv("dex_post"),
                                       /* balloon */ false)),
         resources(decode_resource_paths(std::getenv("extracted_resources"),
                                         "post")) {}
@@ -52,6 +42,7 @@ struct PostVerify : public Verify {
 DexClass* find_class_named(const DexClasses& classes, const char* name);
 DexMethod* find_vmethod_named(const DexClass& cls, const char* name);
 DexMethod* find_dmethod_named(const DexClass& cls, const char* name);
+DexMethod* find_method_named(const DexClass& cls, const char* name);
 /* Find the first invoke instruction that calls a particular method name */
 DexOpcodeMethod* find_invoke(const DexMethod* m, DexOpcode opcode,
     const char* mname);

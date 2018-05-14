@@ -109,22 +109,8 @@ using std::placeholders::_1;
 using TypeLattice = BitVectorLattice<IRType, 16, std::hash<int>>;
 
 TypeLattice type_lattice(
-    {BOTTOM,
-     ZERO,
-     CONST,
-     CONST1,
-     CONST2,
-     REFERENCE,
-     INT,
-     FLOAT,
-     LONG1,
-     LONG2,
-     DOUBLE1,
-     DOUBLE2,
-     SCALAR,
-     SCALAR1,
-     SCALAR2,
-     TOP},
+    {BOTTOM, ZERO, CONST, CONST1, CONST2, REFERENCE, INT, FLOAT, LONG1, LONG2,
+     DOUBLE1, DOUBLE2, SCALAR, SCALAR1, SCALAR2, TOP},
     {{BOTTOM, ZERO},    {BOTTOM, CONST1},   {BOTTOM, CONST2},
      {ZERO, REFERENCE}, {ZERO, CONST},      {CONST, INT},
      {CONST, FLOAT},    {CONST1, LONG1},    {CONST1, DOUBLE1},
@@ -159,9 +145,9 @@ class TypeCheckingException final : public std::runtime_error {
 class TypeInference final
     : public MonotonicFixpointIterator<cfg::GraphInterface, TypeEnvironment> {
  public:
-  using NodeId = Block*;
+  using NodeId = cfg::Block*;
 
-  TypeInference(const ControlFlowGraph& cfg,
+  TypeInference(const cfg::ControlFlowGraph& cfg,
                 bool enable_polymorphic_constants,
                 bool verify_moves)
       : MonotonicFixpointIterator(cfg, cfg.blocks().size()),
@@ -183,7 +169,7 @@ class TypeInference final
     bool first_param = true;
     // By construction, the IOPCODE_LOAD_PARAM_* instructions are located at the
     // beginning of the entry block of the CFG.
-    for (auto& mie : InstructionIterable(m_cfg.entry_block())) {
+    for (const auto& mie : InstructionIterable(m_cfg.entry_block())) {
       IRInstruction* insn = mie.insn;
       switch (insn->opcode()) {
       case IOPCODE_LOAD_PARAM_OBJECT: {
@@ -283,10 +269,10 @@ class TypeInference final
     }
     case OPCODE_MOVE_WIDE: {
       assume_wide_scalar(current_state, insn->src(0));
-      set_type(current_state, insn->dest(), current_state->get(insn->src(0)));
-      set_type(current_state,
-               insn->dest() + 1,
-               current_state->get(insn->src(0) + 1));
+      TypeDomain td1 = current_state->get(insn->src(0));
+      TypeDomain td2 = current_state->get(insn->src(0) + 1);
+      set_type(current_state, insn->dest(), td1);
+      set_type(current_state, insn->dest() + 1, td2);
       break;
     }
     case IOPCODE_MOVE_RESULT_PSEUDO:
@@ -376,18 +362,17 @@ class TypeInference final
       break;
     }
     case OPCODE_FILLED_NEW_ARRAY: {
-      const DexType* type = get_array_type(insn->get_type());
+      const DexType* element_type = get_array_type(insn->get_type());
       // We assume that structural constraints on the bytecode are satisfied,
       // i.e., the type is indeed an array type.
-      always_assert(type != nullptr);
-      // Although the Dalvik bytecode specification states that a
-      // filled-new-array operation could be used with an array of references,
-      // the Dex compiler seems to never generate that case. The assert is used
-      // here as a safeguard.
-      always_assert_log(
-          !is_object(type), "Unexpected instruction '%s'.\n", SHOW(insn));
+      always_assert(element_type != nullptr);
+      bool is_array_of_references = is_object(element_type);
       for (size_t i = 0; i < insn->srcs_size(); ++i) {
-        assume_scalar(current_state, insn->src(i));
+        if (is_array_of_references) {
+          assume_reference(current_state, insn->src(i));
+        } else {
+          assume_scalar(current_state, insn->src(i));
+        }
       }
       set_reference(current_state, RESULT_REGISTER);
       break;
@@ -866,7 +851,7 @@ class TypeInference final
   }
 
   void print(std::ostream& output) const {
-    for (Block* block : m_cfg.blocks()) {
+    for (cfg::Block* block : m_cfg.blocks()) {
       for (auto& mie : InstructionIterable(block)) {
         IRInstruction* insn = mie.insn;
         auto it = m_type_envs.find(insn);
@@ -881,7 +866,7 @@ class TypeInference final
     // We reserve enough space for the map in order to avoid repeated rehashing
     // during the computation.
     m_type_envs.reserve(m_cfg.blocks().size() * 16);
-    for (Block* block : m_cfg.blocks()) {
+    for (cfg::Block* block : m_cfg.blocks()) {
       TypeEnvironment current_state = get_entry_state_at(block);
       for (auto& mie : InstructionIterable(block)) {
         IRInstruction* insn = mie.insn;
@@ -1174,7 +1159,7 @@ class TypeInference final
     return out;
   }
 
-  const ControlFlowGraph& m_cfg;
+  const cfg::ControlFlowGraph& m_cfg;
   bool m_enable_polymorphic_constants;
   bool m_verify_moves;
   bool m_inference;
@@ -1191,9 +1176,7 @@ class Result final {
  public:
   static Result Ok() { return Result(); }
 
-  static Result make_error(const std::string& s) {
-    return Result(s);
-  }
+  static Result make_error(const std::string& s) { return Result(s); }
 
   const std::string& error_message() const {
     always_assert(!is_ok);
@@ -1228,7 +1211,7 @@ static bool is_move_result_pseudo(const MethodItemEntry& mie) {
 Result check_structure(const IRCode* code) {
   bool has_seen_non_load_param_opcode{false};
   for (auto it = code->begin(); it != code->end(); ++it) {
-    // XXX we are using FatMethod::iterator instead of InstructionIterator here
+    // XXX we are using IRList::iterator instead of InstructionIterator here
     // because the latter does not support reverse iteration
     if (it->type != MFLOW_OPCODE) {
       continue;
@@ -1315,7 +1298,7 @@ void IRTypeChecker::run() {
 
   // We then infer types for all the registers used in the method.
   code->build_cfg();
-  const ControlFlowGraph& cfg = code->cfg();
+  const cfg::ControlFlowGraph& cfg = code->cfg();
   m_type_inference = std::make_unique<irtc_impl::TypeInference>(
       cfg, m_enable_polymorphic_constants, m_verify_moves);
   m_type_inference->run(m_dex_method);

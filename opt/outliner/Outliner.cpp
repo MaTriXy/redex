@@ -165,6 +165,7 @@ void Outliner::run_pass(DexStoresVector& stores,
       scope,
       match,
       [&](DexMethod* method,
+          cfg::Block*,
           const std::vector<IRInstruction*>& insns) {
         always_assert(insns.size() == 6);
 

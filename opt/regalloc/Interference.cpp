@@ -135,11 +135,12 @@ void Graph::remove_node(reg_t u) {
   u_node.m_props.reset(Node::ACTIVE);
 }
 
-size_t dest_bit_width(FatMethod::iterator it) {
+size_t dest_bit_width(IRList::iterator it) {
   auto insn = it->insn;
   auto op = insn->opcode();
   if (opcode::is_move_result_pseudo(op)) {
-    auto primary_op = primary_instruction_of_move_result_pseudo(it)->opcode();
+    auto primary_op =
+        ir_list::primary_instruction_of_move_result_pseudo(it)->opcode();
     if (primary_op == OPCODE_CHECK_CAST) {
       return 4;
     } else {
@@ -164,7 +165,26 @@ size_t src_bit_width(IROpcode op, int i) {
   return dex_opcode::src_bit_width(opcode::to_dex_opcode(op), i);
 }
 
-void GraphBuilder::update_node_constraints(FatMethod::iterator it,
+reg_t max_value_for_src(const IRInstruction* insn,
+                        size_t src_index,
+                        bool src_is_wide) {
+  auto max_value = max_unsigned_value(src_bit_width(insn->opcode(), src_index));
+  auto op = insn->opcode();
+  if (opcode::has_range_form(op) && insn->srcs_size() == 1) {
+    // An `invoke {v0}` opcode can always be rewritten as `invoke/range {v0}`
+    return max_unsigned_value(16);
+  } else if (is_invoke(op) && src_is_wide) {
+    // invoke instructions need to address both pairs of a wide register in
+    // their denormalized form. We are dealing with the normalized form
+    // here, so we need to reserve one register for denormalization. I.e.
+    // `invoke-static {v14} LFoo.a(J)` will expand into
+    // `invoke-static {v14, v15} LFoo.a(J)` after denormalization.
+    --max_value;
+  }
+  return max_value;
+}
+
+void GraphBuilder::update_node_constraints(IRList::iterator it,
                                            const RangeSet& range_set,
                                            Graph* graph) {
   auto insn = it->insn;
@@ -193,19 +213,8 @@ void GraphBuilder::update_node_constraints(FatMethod::iterator it,
     if (range_set.contains(insn)) {
       max_vreg = max_unsigned_value(16);
       node.m_props.set(Node::RANGE);
-    } else if (opcode::has_range_form(op) && insn->srcs_size() == 1) {
-      // An `invoke {v0}` opcode can always be rewritten as `invoke/range {v0}`
-      max_vreg = max_unsigned_value(16);
     } else {
-      max_vreg = max_unsigned_value(src_bit_width(op, i));
-      if (is_invoke(op) && type == RegisterType::WIDE) {
-        // invoke instructions need to address both pairs of a wide register in
-        // their denormalized form. We are dealing with the normalized form
-        // here, so we need to reserve one register for denormalization. I.e.
-        // `invoke-static {v14} LFoo.a(J)` will expand into
-        // `invoke-static {v14, v15} LFoo.a(J)` after denormalization.
-        --max_vreg;
-      }
+      max_vreg = max_value_for_src(insn, i, type == RegisterType::WIDE);
     }
     node.m_max_vreg = std::min(node.m_max_vreg, max_vreg);
     if (max_vreg < max_unsigned_value(16)) {
@@ -268,7 +277,7 @@ Graph GraphBuilder::build(const LivenessFixpointIterator& fixpoint_iter,
   }
 
   auto& cfg = code->cfg();
-  for (Block* block : cfg.blocks()) {
+  for (cfg::Block* block : cfg.blocks()) {
     LivenessDomain live_out = fixpoint_iter.get_live_out_vars_at(block);
     for (auto it = block->rbegin(); it != block->rend(); ++it) {
       if (it->type != MFLOW_OPCODE) {

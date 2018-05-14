@@ -10,6 +10,7 @@
 #include "DexOpcode.h"
 
 #include "Debug.h"
+#include "Show.h"
 
 namespace dex_opcode {
 
@@ -19,6 +20,7 @@ OpcodeFormat format(DexOpcode opcode) {
   case code:                   \
     return FMT_##fmt;
     DOPS
+    QDOPS
 #undef OP
   case FOPCODE_PACKED_SWITCH : return FMT_fopcode;
   case FOPCODE_SPARSE_SWITCH:

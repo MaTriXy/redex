@@ -55,8 +55,22 @@ const char* safe_types_on_refs[] = {
     "Ljava/nio/ByteBuffer;"
 };
 
-constexpr int MAX_INSTRUCTION_SIZE = 1 << 16;
-constexpr int INSTRUCTION_BUFFER = 1 << 12;
+/*
+ * This is the maximum size of method that Dex bytecode can encode.
+ * The table of instructions is indexed by a 32 bit unsigned integer.
+ */
+constexpr uint64_t HARD_MAX_INSTRUCTION_SIZE = 1L << 32;
+
+/*
+ * Some versions of ART (5.0.0 - 5.0.2) will fail to verify a method if it
+ * is too large. See https://code.google.com/p/android/issues/detail?id=66655.
+ *
+ * The verifier rounds up to the next power of two, and doesn't support any
+ * size greater than 16. See
+ * http://androidxref.com/5.0.0_r2/xref/art/compiler/dex/verified_method.cc#107
+ */
+constexpr uint32_t SOFT_MAX_INSTRUCTION_SIZE = 1 << 16;
+constexpr uint32_t INSTRUCTION_BUFFER = 1 << 12;
 
 /**
  * Use this cache once the optimization is invoked to make sure
@@ -219,8 +233,8 @@ void MultiMethodInliner::inline_callees(
 
   // walk the caller opcodes collecting all candidates to inline
   // Build a callee to opcode map
-  std::vector<std::pair<DexMethod*, FatMethod::iterator>> inlinables;
-  InstructionIterable ii(caller->get_code());
+  std::vector<std::pair<DexMethod*, IRList::iterator>> inlinables;
+  auto ii = InstructionIterable(caller->get_code());
   auto end = ii.end();
   for (auto it = ii.begin(); it != end; ++it) {
     auto insn = it->insn;
@@ -240,6 +254,33 @@ void MultiMethodInliner::inline_callees(
     info.not_found += callees.size() - found;
   }
 
+  inline_inlinables(caller, inlinables);
+}
+
+void MultiMethodInliner::inline_callees(
+    DexMethod* caller, const std::unordered_set<IRInstruction*>& insns) {
+  auto ii = InstructionIterable(caller->get_code());
+  auto end = ii.end();
+
+  std::vector<std::pair<DexMethod*, IRList::iterator>> inlinables;
+  for (auto it = ii.begin(); it != end; ++it) {
+    auto insn = it->insn;
+    if (insns.count(insn)) {
+      auto callee = resolver(insn->get_method(), opcode_to_search(insn));
+      if (callee == nullptr) {
+        continue;
+      }
+      always_assert(callee->is_concrete());
+      inlinables.push_back(std::make_pair(callee, it.unwrap()));
+    }
+  }
+
+  inline_inlinables(caller, inlinables);
+}
+
+void MultiMethodInliner::inline_inlinables(
+    DexMethod* caller,
+    const std::vector<std::pair<DexMethod*, IRList::iterator>>& inlinables) {
   // attempt to inline all inlinable candidates
   size_t estimated_insn_size = caller->get_code()->sum_opcode_sizes();
   for (auto inlinable : inlinables) {
@@ -311,9 +352,28 @@ bool MultiMethodInliner::is_blacklisted(const DexMethod* callee) {
   return false;
 }
 
+bool MultiMethodInliner::is_estimate_over_max(uint64_t estimated_caller_size,
+                                              const DexMethod* callee,
+                                              uint64_t max) {
+  // INSTRUCTION_BUFFER is added because the final method size is often larger
+  // than our estimate -- during the sync phase, we may have to pick larger
+  // branch opcodes to encode large jumps.
+  auto callee_size = callee->get_code()->sum_opcode_sizes();
+  if (estimated_caller_size + callee_size > max - INSTRUCTION_BUFFER) {
+    info.caller_too_large++;
+    return true;
+  }
+  return false;
+}
+
 bool MultiMethodInliner::caller_too_large(DexType* caller_type,
-                                          size_t estimated_insn_size,
+                                          size_t estimated_caller_size,
                                           const DexMethod* callee) {
+  if (is_estimate_over_max(estimated_caller_size, callee,
+                           HARD_MAX_INSTRUCTION_SIZE)) {
+    return true;
+  }
+
   if (!m_config.enforce_method_size_limit) {
     return false;
   }
@@ -322,15 +382,11 @@ bool MultiMethodInliner::caller_too_large(DexType* caller_type,
     return false;
   }
 
-  // INSTRUCTION_BUFFER is added because the final method size is often larger
-  // than our estimate -- during the sync phase, we may have to pick larger
-  // branch opcodes to encode large jumps.
-  auto insns_size = callee->get_code()->sum_opcode_sizes();
-  if (estimated_insn_size + insns_size >
-      MAX_INSTRUCTION_SIZE - INSTRUCTION_BUFFER) {
-    info.caller_too_large++;
+  if (is_estimate_over_max(estimated_caller_size, callee,
+                           SOFT_MAX_INSTRUCTION_SIZE)) {
     return true;
   }
+
   return false;
 }
 
@@ -365,7 +421,7 @@ bool MultiMethodInliner::has_external_catch(const DexMethod* callee) {
 bool MultiMethodInliner::cannot_inline_opcodes(const DexMethod* caller,
                                                const DexMethod* callee) {
   int ret_count = 0;
-  for (auto& mie : InstructionIterable(callee->get_code())) {
+  for (const auto& mie : InstructionIterable(callee->get_code())) {
     auto insn = mie.insn;
     if (create_vmethod(insn)) return true;
     if (nonrelocatable_invoke_super(insn, callee, caller)) return true;
@@ -523,7 +579,7 @@ bool MultiMethodInliner::unknown_field(IRInstruction* insn,
 
 bool MultiMethodInliner::cross_store_reference(const DexMethod* callee) {
   size_t store_idx = xstores.get_store_idx(callee->get_class());
-  for (auto& mie : InstructionIterable(callee->get_code())) {
+  for (const auto& mie : InstructionIterable(callee->get_code())) {
     auto insn = mie.insn;
     if (insn->has_type()) {
       if (xstores.illegal_ref(store_idx, insn->get_type())) {
@@ -648,58 +704,6 @@ void select_inlinable(
   }
 }
 
-void change_visibility(DexMethod* callee) {
-  auto code = callee->get_code();
-  always_assert(code != nullptr);
-
-  for (auto& mie : InstructionIterable(code)) {
-    auto insn = mie.insn;
-
-    if (insn->has_field()) {
-      auto cls = type_class(insn->get_field()->get_class());
-      if (cls != nullptr && !cls->is_external()) {
-        set_public(cls);
-      }
-      auto field =
-          resolve_field(insn->get_field(), is_sfield_op(insn->opcode())
-              ? FieldSearch::Static : FieldSearch::Instance);
-      if (field != nullptr && field->is_concrete()) {
-        set_public(field);
-        set_public(type_class(field->get_class()));
-        // FIXME no point in rewriting opcodes in the callee
-        insn->set_field(field);
-      }
-    } else if (insn->has_method()) {
-      auto cls = type_class(insn->get_method()->get_class());
-      if (cls != nullptr && !cls->is_external()) {
-        set_public(cls);
-      }
-      auto method = resolve_method(insn->get_method(), opcode_to_search(insn));
-      if (method != nullptr && method->is_concrete()) {
-        set_public(method);
-        set_public(type_class(method->get_class()));
-        // FIXME no point in rewriting opcodes in the callee
-        insn->set_method(method);
-      }
-    } else if (insn->has_type()) {
-      auto type = insn->get_type();
-      auto cls = type_class(type);
-      if (cls != nullptr && !cls->is_external()) {
-        set_public(cls);
-      }
-    }
-  }
-
-  std::vector<DexType*> types;
-  callee->get_code()->gather_catch_types(types);
-  for (auto type : types) {
-    auto cls = type_class(type);
-    if (cls != nullptr && !cls->is_external()) {
-      set_public(cls);
-    }
-  }
-}
-
 namespace {
 
 using RegMap = transform::RegMap;
@@ -715,7 +719,7 @@ using RegMap = transform::RegMap;
 std::unique_ptr<RegMap> gen_callee_reg_map(
     IRCode* caller_code,
     const IRCode* callee_code,
-    FatMethod::iterator invoke_it) {
+    IRList::iterator invoke_it) {
   auto callee_reg_start = caller_code->get_registers_size();
   auto insn = invoke_it->insn;
   auto reg_map = std::make_unique<RegMap>();
@@ -726,7 +730,8 @@ std::unique_ptr<RegMap> gen_callee_reg_map(
   }
 
   // generate and insert the move instructions
-  auto param_insns = InstructionIterable(callee_code->get_param_instructions());
+  auto param_insns =
+      InstructionIterable(callee_code->get_param_instructions());
   auto param_it = param_insns.begin();
   auto param_end = param_insns.end();
   for (size_t i = 0; i < insn->srcs_size(); ++i, ++param_it) {
@@ -787,12 +792,13 @@ IRInstruction* move_result(IRInstruction* res, IRInstruction* move_res) {
  */
 void remap_callee_for_tail_call(const IRCode* caller_code,
                                 IRCode* callee_code,
-                                FatMethod::iterator invoke_it) {
+                                IRList::iterator invoke_it) {
   RegMap reg_map;
   auto insn = invoke_it->insn;
   auto callee_reg_start = caller_code->get_registers_size();
 
-  auto param_insns = InstructionIterable(callee_code->get_param_instructions());
+  auto param_insns =
+      InstructionIterable(callee_code->get_param_instructions());
   auto param_it = param_insns.begin();
   auto param_end = param_insns.end();
   for (size_t i = 0; i < insn->srcs_size(); ++i, ++param_it) {
@@ -842,7 +848,7 @@ void cleanup_callee_debug(IRCode* callee_code) {
 } // namespace
 
 /*
- * For splicing a callee's FatMethod into a caller.
+ * For splicing a callee's IRList into a caller.
  */
 class MethodSplicer {
   IRCode* m_mtcaller;
@@ -913,9 +919,9 @@ class MethodSplicer {
     not_reached();
   }
 
-  void operator()(FatMethod::iterator insert_pos,
-                  FatMethod::iterator fcallee_start,
-                  FatMethod::iterator fcallee_end) {
+  void operator()(IRList::iterator insert_pos,
+                  IRList::iterator fcallee_start,
+                  IRList::iterator fcallee_end) {
     for (auto it = fcallee_start; it != fcallee_end; ++it) {
       if (should_skip_debug(&*it)) {
         continue;
@@ -1003,7 +1009,7 @@ namespace inliner {
 
 void inline_method(IRCode* caller_code,
                    IRCode* callee_code,
-                   FatMethod::iterator pos) {
+                   IRList::iterator pos) {
   TRACE(INL, 5, "caller code:\n%s\n", SHOW(caller_code));
   TRACE(INL, 5, "callee code:\n%s\n", SHOW(callee_code));
 
@@ -1020,7 +1026,7 @@ void inline_method(IRCode* caller_code,
   // find the last position entry before the invoke.
   // we need to decrement the reverse iterator because it gets constructed
   // as pointing to the element preceding pos
-  auto position_it = --FatMethod::reverse_iterator(pos);
+  auto position_it = --IRList::reverse_iterator(pos);
   while (++position_it != caller_code->rend()
       && position_it->type != MFLOW_POSITION);
   std::unique_ptr<DexPosition> pos_nullptr;
@@ -1100,7 +1106,7 @@ void inline_method(IRCode* caller_code,
 
 void inline_tail_call(DexMethod* caller,
                       DexMethod* callee,
-                      FatMethod::iterator pos) {
+                      IRList::iterator pos) {
   TRACE(INL, 2, "caller: %s\ncallee: %s\n", SHOW(caller), SHOW(callee));
   auto* caller_code = caller->get_code();
   auto* callee_code = callee->get_code();

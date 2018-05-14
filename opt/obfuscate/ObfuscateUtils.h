@@ -93,8 +93,8 @@ public:
 
   virtual std::string get_printable() {
     std::ostringstream res;
-    res << "  0x" << this->get() << ": (" << SHOW(dex_elem->get_class()) << ") "
-        << SHOW(dex_elem->get_name()) << " -> " << get_name() << std::endl;
+    res << "  0x" << this->get() << ": " << show(dex_elem) << " -> "
+        << get_name();
     return res.str();
   }
 
@@ -226,9 +226,8 @@ public:
 
   std::string get_printable() override {
     std::ostringstream res;
-    res << "  0x" << this << ": (" << SHOW(dex_elem->get_class())
-        << ") " << SHOW(dex_elem->get_name()) << " -> " << get_name()
-        << " => 0x" << next << std::endl;
+    res << "  0x" << this << ": " << show(dex_elem) << " -> " << get_name()
+        << " => 0x" << next;
     return res.str();
   }
 };
@@ -335,6 +334,10 @@ public:
       std::string new_name(this->next_name());
       wrap->set_name(new_name);
       this->used_ids.insert(new_name);
+      TRACE(OBFUSCATE, 3,
+            "\tTrying method name %s for %s\n",
+            wrap->get_name(),
+            SHOW(wrap->get()));
     } while (DexMethod::get_method(
         wrap->get()->get_class(),
         DexString::make_string(wrap->get_name()),
@@ -347,6 +350,37 @@ public:
           wrap->get_name(),
           this->ids_to_avoid.size());
     // Keep spinning on a name until you find one that isn't used at all
+  }
+};
+
+class FieldNameGenerator : public SimpleNameGenerator<DexField*> {
+ public:
+  FieldNameGenerator(const std::unordered_set<std::string>& ids_to_avoid,
+      std::unordered_set<std::string>& used_ids) :
+    SimpleNameGenerator<DexField*>(ids_to_avoid, used_ids) { }
+
+  void find_new_name(DexFieldWrapper* wrap) override {
+    if (wrap->is_modified()) return;
+    do {
+      std::string new_name(this->next_name());
+      wrap->set_name(new_name);
+      this->used_ids.insert(new_name);
+      TRACE(OBFUSCATE, 2,
+            "\tTrying field name %s for %s\n",
+            wrap->get_name(),
+            SHOW(wrap->get()));
+    } while (DexField::get_field(
+        wrap->get()->get_class(),
+        DexString::make_string(wrap->get_name()),
+        wrap->get()->get_type()) != nullptr);
+    // Keep spinning on a name until you find one that isn't used at all
+    TRACE(OBFUSCATE,
+          2,
+          "\tIntending to rename elem %s (%s) (renamable %s) to %s\n",
+          SHOW(wrap->get()),
+          SHOW(wrap->get()->get_name()),
+          should_rename_elem(wrap->get()) ? "true" : "false",
+          wrap->get_name());
   }
 };
 
@@ -497,15 +531,15 @@ public:
           }
           auto elem = wrap->get();
           TRACE(OBFUSCATE, 2,
-              "\tRenaming the elem 0x%x (%s) %s%s to %s external: %s can_rename: %s\n",
-              elem, SHOW(sig_getter_fn(elem)),
-              SHOW(elem->get_class()),
-              SHOW(elem->get_name()), wrap->get_name(),
-              type_class(wrap->get()->get_class())->is_external() ? "true" :
-                "false", can_rename(elem) ? "true" : "false");
-          if (renamed_elems.count(elem) > 0)
+                "\tRenaming the elem 0x%x %s%s to %s external: %s can_rename: "
+                "%s\n",
+                elem, SHOW(sig_getter_fn(elem)), SHOW(elem), wrap->get_name(),
+                type_class(elem->get_class())->is_external() ? "true" : "false",
+                can_rename(elem) ? "true" : "false");
+          if (renamed_elems.count(elem) > 0) {
             TRACE(OBFUSCATE, 2, "Found elem we've already renamed %s\n",
-                SHOW(elem));
+                  SHOW(elem));
+          }
           renamed_elems.insert(elem);
           elem->change(ref_getter_fn(wrap->get_name()));
           renamings++;

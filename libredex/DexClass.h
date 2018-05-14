@@ -24,6 +24,7 @@
 #include "DexDebugInstruction.h"
 #include "DexDefs.h"
 #include "DexIdx.h"
+#include "DexEncoding.h"
 #include "DexInstruction.h"
 #include "DexPosition.h"
 #include "RedexContext.h"
@@ -58,12 +59,6 @@ class DexOutputIdx;
 class DexString;
 class DexType;
 using Scope = std::vector<DexClass*>;
-
-// Forward decls to break cycle with ProguardMap.h
-std::string proguard_name(const DexType* cls);
-std::string proguard_name(const DexClass* cls);
-std::string proguard_name(const DexMethodRef* method);
-std::string proguard_name(const DexFieldRef* field);
 
 class DexString {
   friend struct RedexContext;
@@ -277,8 +272,12 @@ class DexFieldRef {
    void gather_types_shallow(std::vector<DexType*>& ltype) const;
    void gather_strings_shallow(std::vector<DexString*>& lstring) const;
 
-   void change(const DexFieldSpec& ref) {
-     g_redex->mutate_field(this, ref);
+   void change(const DexFieldSpec& ref, bool rename_on_collision = false) {
+     g_redex->mutate_field(this, ref, rename_on_collision);
+   }
+
+   static void erase_field(DexFieldRef* f) {
+     return g_redex->erase_field(f);
    }
 };
 
@@ -346,6 +345,7 @@ class DexField : public DexFieldRef {
   void set_external() {
     always_assert_log(!m_concrete,
         "Unexpected concrete field %s\n", SHOW(this));
+    m_deobfuscated_name = show(this);
     m_external = true;
   }
 
@@ -365,8 +365,8 @@ class DexField : public DexFieldRef {
   }
 
   void set_deobfuscated_name(std::string name) { m_deobfuscated_name = name; }
-  std::string get_deobfuscated_name() const {
-    return is_external() ? proguard_name(this) : m_deobfuscated_name;
+  const std::string& get_deobfuscated_name() const {
+    return m_deobfuscated_name;
   }
 
   void make_concrete(DexAccessFlags access_flags, DexEncodedValue* v = nullptr);
@@ -756,6 +756,10 @@ class DexMethodRef {
    void change(const DexMethodSpec& ref, bool rename_on_collision = false) {
      g_redex->mutate_method(this, ref, rename_on_collision);
    }
+
+   static void erase_method(DexMethodRef* m) {
+     return g_redex->erase_method(m);
+   }
 };
 
 class DexMethod : public DexMethodRef {
@@ -841,10 +845,6 @@ class DexMethod : public DexMethodRef {
     return g_redex->get_method(type, name, proto);
   }
 
-  static void erase_method(DexMethodRef* m) {
-    return g_redex->erase_method(m);
-  }
-
  public:
   const DexAnnotationSet* get_anno_set() const { return m_anno; }
   DexAnnotationSet* get_anno_set() { return m_anno; }
@@ -868,8 +868,8 @@ class DexMethod : public DexMethodRef {
   }
 
   void set_deobfuscated_name(std::string name) { m_deobfuscated_name = name; }
-  std::string get_deobfuscated_name() const {
-    return is_external() ? proguard_name(this) : m_deobfuscated_name;
+  const std::string& get_deobfuscated_name() const {
+    return m_deobfuscated_name;
   }
 
   /** return just the name of the method */
@@ -902,6 +902,7 @@ class DexMethod : public DexMethodRef {
   void set_external() {
     always_assert_log(!m_concrete,
         "Unexpected concrete method %s\n", SHOW(this));
+    m_deobfuscated_name = show(this);
     m_external = true;
   }
   void set_dex_code(std::unique_ptr<DexCode> code) {
@@ -965,7 +966,6 @@ class DexClass {
   DexTypeList* m_interfaces;
   DexString* m_source_file;
   DexAnnotationSet* m_anno;
-  bool m_has_class_data;
   bool m_external;
   std::string m_deobfuscated_name;
   const std::string m_dex_location; // TODO: string interning
@@ -1046,8 +1046,7 @@ class DexClass {
   const char* c_str() const { return get_name()->c_str(); }
   DexTypeList* get_interfaces() const { return m_interfaces; }
   DexString* get_source_file() const { return m_source_file; }
-  bool has_class_data() const { return m_has_class_data; }
-  void set_class_data(bool has_class_data) { m_has_class_data = has_class_data; }
+  bool has_class_data() const;
   bool is_def() const { return true; }
   bool is_external() const { return m_external; }
   DexEncodedValueArray* get_static_values();
@@ -1056,8 +1055,8 @@ class DexClass {
   void attach_annotation_set(DexAnnotationSet* anno) { m_anno = anno; }
   void set_source_file(DexString* source_file) { m_source_file = source_file; }
   void set_deobfuscated_name(std::string name) { m_deobfuscated_name = name; }
-  std::string get_deobfuscated_name() const {
-    return is_external() ? proguard_name(this) : m_deobfuscated_name;
+  const std::string& get_deobfuscated_name() const {
+    return m_deobfuscated_name;
   }
   const std::string& get_dex_location() const {
     return m_dex_location;

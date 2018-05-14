@@ -262,14 +262,15 @@ class Graph {
  * the given IROpcode when it is converted to a DexInstruction in the
  * instruction lowering process.
  */
-size_t dest_bit_width(FatMethod::iterator it);
+size_t dest_bit_width(IRList::iterator it);
 
 /*
- * The number of bits that will be available for encoding the src register of
- * the given IROpcode when it is converted to a DexInstruction in the
- * instruction lowering process.
+ * The largest valid register that we can map the symreg in insn->src(src_index)
+ * to.
  */
-size_t src_bit_width(IROpcode op, int i);
+reg_t max_value_for_src(const IRInstruction* insn,
+                        size_t src_index,
+                        bool src_is_wide);
 
 namespace impl {
 
@@ -281,7 +282,7 @@ inline uint32_t div_ceil(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
  * limited public interface.
  */
 class GraphBuilder {
-  static void update_node_constraints(FatMethod::iterator,
+  static void update_node_constraints(IRList::iterator,
                                       const RangeSet&,
                                       Graph*);
 

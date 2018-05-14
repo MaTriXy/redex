@@ -54,8 +54,11 @@ struct RedexContext {
   DexFieldRef* get_field(const DexType* container,
                          const DexString* name,
                          const DexType* type);
+
+  void erase_field(DexFieldRef*);
   void mutate_field(DexFieldRef* field,
-                    const DexFieldSpec& ref);
+                    const DexFieldSpec& ref,
+                    bool rename_on_collision = false);
 
   DexTypeList* make_type_list(std::deque<DexType*>&& p);
   DexTypeList* get_type_list(std::deque<DexType*>&& p);

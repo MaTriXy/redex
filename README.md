@@ -13,7 +13,7 @@ source.
 
 We use package managers to resolve third-party library dependencies.
 
-### Mac OS X
+### macOS
 
 You will need Xcode with command line tools installed.  To get the command line tools, use:
 ```
@@ -26,7 +26,7 @@ brew install autoconf automake libtool python3
 brew install boost jsoncpp
 ```
 
-### Ubuntu 14.04 LTS (64-bit)
+### Ubuntu (64-bit)
 ```
 sudo apt-get install \
     g++ \
@@ -34,7 +34,6 @@ sudo apt-get install \
     autoconf \
     autoconf-archive \
     libtool \
-    libboost-all-dev \
     liblz4-dev \
     liblzma-dev \
     make \
@@ -43,6 +42,17 @@ sudo apt-get install \
     libjemalloc-dev \
     libiberty-dev \
     libjsoncpp-dev
+```
+
+Redex requires boost version >= 1.58. The versions in the Ubuntu 14.04 and
+14.10 repositories are too old. This script will install boost for you instead:
+```
+sudo ./get_boost.sh
+```
+
+If you're on ubuntu 16.04 or newer, the version in the repository is fine:
+```
+sudo apt-get install libboost-all-dev
 ```
 
 ### Experimental: Windows 10 (64-bit)
@@ -61,6 +71,7 @@ Install necessary libraries with `x64-windows-static`:
 .\vcpkg install boost --triplet x64-windows-static
 .\vcpkg install zlib --triplet x64-windows-static
 .\vcpkg install jsoncpp --triplet x64-windows-static
+.\vcpkg install mman --triplet x64-windows-static
 ```
 
 ## Download, Build and Install
@@ -184,7 +195,7 @@ PATH=/path/to/android/sdk/build-tools/xx.y.zz:$PATH redex [... arguments ...]
 
 After you run redex, you'll need to re-sign your app.  You can re-sign manually
 using these instructions:
-http://developer.android.com/tools/publishing/app-signing.html#signing-manually.
+https://developer.android.com/tools/publishing/app-signing.html#signing-manually.
 
 You can also tell redex to sign for you.  If you want to sign with the debug
 key, you can simply do:
@@ -244,15 +255,8 @@ ReDex, however, optimizes .dex bytecode, while ProGuard optimizes .class
 bytecode before it is lowered to .dex.  Operating on .dex is sometimes an
 advantage: you can consider the number of virtual registers used by a method
 that is an inlining candidate, and you can control the layout of classes within
-a dex file.  But ProGuard has many capabilities that ReDex does not (for
+a dex file.  But ProGuard has some capabilities that ReDex does not (for
 example, ReDex will not remove unused method parameters, which ProGuard does).
-
-In our opinion, comparing ReDex and ProGuard is a bit apples-and-oranges, since
-we have focused on optimizations that add value on top of ProGuard.  We use both
-tools to optimize the Facebook app.  Our reported performance and size
-improvements (about 25% on both dex size and cold start time) are based on using
-ReDex on an app already optimized with ProGuard.  We have no plans to measure
-performance without ProGuard.
 
 ## How about DexGuard?
 

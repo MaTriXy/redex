@@ -61,7 +61,7 @@ class AbstractAccessPath final : public AbstractValue<AbstractAccessPath> {
 
   void clear() override { m_path.m_getters.clear(); }
 
-  Kind kind() const override { return Kind::Value; }
+  AbstractValueKind kind() const override { return AbstractValueKind::Value; }
 
   bool leq(const AbstractAccessPath& other) const override {
     return equals(other);
@@ -71,27 +71,27 @@ class AbstractAccessPath final : public AbstractValue<AbstractAccessPath> {
     return m_path == other.m_path;
   }
 
-  Kind join_with(const AbstractAccessPath& other) override {
+  AbstractValueKind join_with(const AbstractAccessPath& other) override {
     if (equals(other)) {
-      return Kind::Value;
+      return AbstractValueKind::Value;
     }
     clear();
-    return Kind::Top;
+    return AbstractValueKind::Top;
   }
 
-  Kind widen_with(const AbstractAccessPath& other) override {
+  AbstractValueKind widen_with(const AbstractAccessPath& other) override {
     return join_with(other);
   }
 
-  Kind meet_with(const AbstractAccessPath& other) override {
+  AbstractValueKind meet_with(const AbstractAccessPath& other) override {
     if (equals(other)) {
-      return Kind::Value;
+      return AbstractValueKind::Value;
     }
     clear();
-    return Kind::Bottom;
+    return AbstractValueKind::Bottom;
   }
 
-  Kind narrow_with(const AbstractAccessPath& other) override {
+  AbstractValueKind narrow_with(const AbstractAccessPath& other) override {
     return meet_with(other);
   }
 
@@ -155,9 +155,9 @@ class Analyzer final
     : public MonotonicFixpointIterator<cfg::GraphInterface,
                                        AbstractAccessPathEnvironment> {
  public:
-  using NodeId = Block*;
+  using NodeId = cfg::Block*;
 
-  Analyzer(const ControlFlowGraph& cfg,
+  Analyzer(const cfg::ControlFlowGraph& cfg,
            std::function<bool(DexMethodRef*)> is_immutable_getter)
       : MonotonicFixpointIterator(cfg, cfg.blocks().size()),
         m_cfg(cfg),
@@ -240,11 +240,42 @@ class Analyzer final
     return abs_path.access_path();
   }
 
+  std::set<size_t> find_access_path_registers(
+      const AbstractAccessPathEnvironment& env,
+      const AccessPath& path_to_find) const {
+    if (!env.is_value()) {
+      return {};
+    }
+    std::set<size_t> res;
+    auto& bindings = env.bindings();
+    for (auto it = bindings.begin(); it != bindings.end(); ++it) {
+      auto domain = it->second;
+      if (domain.access_path()) {
+        auto path = *domain.access_path();
+        if (path_to_find == path && it->first != RESULT_REGISTER) {
+          res.emplace(it->first);
+        }
+      }
+    }
+    return res;
+  }
+
+  std::set<size_t> find_access_path_registers(
+      IRInstruction* insn,
+      const AccessPath& path) const {
+    auto it = m_environments.find(insn);
+    if (it == m_environments.end()) {
+      return {};
+    }
+    auto env = it->second;
+    return find_access_path_registers(env, path);
+  }
+
   void populate_environments() {
     // We reserve enough space for the map in order to avoid repeated rehashing
     // during the computation.
     m_environments.reserve(m_cfg.blocks().size() * 16);
-    for (Block* block : m_cfg.blocks()) {
+    for (cfg::Block* block : m_cfg.blocks()) {
       AbstractAccessPathEnvironment current_state = get_entry_state_at(block);
       for (auto& mie : InstructionIterable(block)) {
         IRInstruction* insn = mie.insn;
@@ -254,8 +285,40 @@ class Analyzer final
     }
   }
 
+  BindingSnapshot get_known_access_path_bindings(
+      const AbstractAccessPathEnvironment& env) {
+    BindingSnapshot ret;
+    if (env.kind() == AbstractValueKind::Value) {
+      auto bindings = env.bindings();
+      for (auto it = bindings.begin(); it != bindings.end(); ++it) {
+        auto domain = it->second;
+        if (domain.access_path()) {
+          auto path = *domain.access_path();
+          if (it->first != RESULT_REGISTER) {
+            ret.emplace(it->first, path);
+          }
+        }
+      }
+    }
+    return ret;
+  }
+
+  std::unordered_map<cfg::BlockId, BlockStateSnapshot> get_block_state_snapshot() {
+    std::unordered_map<cfg::BlockId, BlockStateSnapshot> ret;
+    for (NodeId block : m_cfg.blocks()) {
+      auto entry_state = get_entry_state_at(block);
+      auto exit_state = get_exit_state_at(block);
+      BlockStateSnapshot snapshot = {
+        get_known_access_path_bindings(entry_state),
+        get_known_access_path_bindings(exit_state)
+      };
+      ret.emplace(block->id(), snapshot);
+    }
+    return ret;
+  }
+
  private:
-  const ControlFlowGraph& m_cfg;
+  const cfg::ControlFlowGraph& m_cfg;
   std::function<bool(DexMethodRef*)> m_is_immutable_getter;
   std::unordered_map<IRInstruction*, AbstractAccessPathEnvironment>
       m_environments;
@@ -273,7 +336,7 @@ ImmutableSubcomponentAnalyzer::ImmutableSubcomponentAnalyzer(
     return;
   }
   code->build_cfg();
-  ControlFlowGraph& cfg = code->cfg();
+  cfg::ControlFlowGraph& cfg = code->cfg();
   cfg.calculate_exit_block();
   m_analyzer = std::make_unique<isa_impl::Analyzer>(cfg, is_immutable_getter);
 
@@ -281,7 +344,8 @@ ImmutableSubcomponentAnalyzer::ImmutableSubcomponentAnalyzer(
   // pseudo-instructions.
   auto init = isa_impl::AbstractAccessPathEnvironment::top();
   size_t parameter = 0;
-  for (auto& mie : InstructionIterable(code->get_param_instructions())) {
+  for (const auto& mie :
+       InstructionIterable(code->get_param_instructions())) {
     switch (mie.insn->opcode()) {
     case IOPCODE_LOAD_PARAM_OBJECT: {
       init.set(mie.insn->dest(),
@@ -310,4 +374,20 @@ boost::optional<AccessPath> ImmutableSubcomponentAnalyzer::get_access_path(
     return boost::none;
   }
   return m_analyzer->get_access_path(reg, insn);
+}
+
+std::set<size_t> ImmutableSubcomponentAnalyzer::find_access_path_registers(
+    IRInstruction* insn,
+    const AccessPath& path) const {
+  if (m_analyzer == nullptr) {
+    return {};
+  }
+  return m_analyzer->find_access_path_registers(insn, path);
+}
+
+std::unordered_map<cfg::BlockId, BlockStateSnapshot> ImmutableSubcomponentAnalyzer::get_block_state_snapshot() const {
+  if (m_analyzer == nullptr) {
+    return {{}};
+  }
+  return m_analyzer->get_block_state_snapshot();
 }

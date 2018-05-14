@@ -45,6 +45,8 @@ size_t cold_start_set_dex_count = 1000;
 
 bool emit_canaries = false;
 int64_t linear_alloc_limit;
+std::string scroll_classes_file;
+std::unordered_map<DexClass*, int32_t> scroll_classes;
 
 void gather_refs(InterDexPass* pass,
                  const DexClass* cls,
@@ -305,6 +307,10 @@ bool should_skip_class(InterDexPass* pass, DexClass* clazz) {
   return false;
 }
 
+bool is_scroll_class(DexClass* clazz) {
+  return scroll_classes.count(clazz);
+}
+
 /*
  * Try and fit :clazz into the last dex in the :outdex vector. If that would
  * result in excessive member refs, start a new dex, putting :clazz in there.
@@ -320,6 +326,10 @@ void emit_class(InterDexPass* pass,
   }
   if (check_if_skip && should_skip_class(pass, clazz)) {
     TRACE(IDEX, 3, "IDEX: Skipping class :: %s\n", SHOW(clazz));
+    return;
+  }
+  if (!is_primary && check_if_skip && is_scroll_class(clazz)) {
+    TRACE(IDEX, 2, "IDEX: Skipping Scroll class :: %s\n", SHOW(clazz));
     return;
   }
 
@@ -451,6 +461,35 @@ std::unordered_set<const DexClass*> find_unrefenced_coldstart_classes(
   return unreferenced_classes;
 }
 
+void get_scroll_classes() {
+  std::ifstream input(scroll_classes_file.c_str(), std::ifstream::in);
+  if (!input) {
+    TRACE(IDEX, 1, "Scroll class file: %s : not found\n", scroll_classes_file.c_str());
+    return;
+  }
+  std::string class_name;
+  int32_t class_no = 0;
+  while (input >> class_name) {
+    auto type = DexType::get_type(class_name.c_str());
+    if (!type) {
+      TRACE(IDEX, 2, "Couldn't find DexType for scroll class: %s\n", class_name.c_str());
+      continue;
+    }
+    auto cls = type_class(type);
+    if (!cls) {
+      TRACE(IDEX, 2, "Couldn't find DexClass for scroll class: %s\n", class_name.c_str());
+      continue;
+    }
+    if (scroll_classes.count(cls)) {
+      TRACE(IDEX, 1, "Duplicate classes found in scroll list\n");
+      exit(1);
+    }
+    TRACE(IDEX, 2, "Adding %s in scroll list\n", SHOW(cls));
+    scroll_classes[cls] = class_no++;
+  }
+  input.close();
+}
+
 DexClassesVector run_interdex(InterDexPass* pass,
                               const DexClassesVector& dexen,
                               ConfigFiles& cfg,
@@ -469,11 +508,13 @@ DexClassesVector run_interdex(InterDexPass* pass,
   cls_skipped_in_secondary = 0;
 
   auto interdexorder = cfg.get_coldstart_classes();
+  get_scroll_classes();
   dex_emit_tracker det;
   for (auto const& dex : dexen) {
     for (auto const& clazz : dex) {
       std::string clzname(clazz->get_type()->get_name()->c_str());
       det.clookup[clzname] = clazz;
+      TRACE(IDEX, 2, "Adding class to dex.clookup %s , %s\n", clzname.c_str(), SHOW(clazz));
     }
   }
 
@@ -486,6 +527,7 @@ DexClassesVector run_interdex(InterDexPass* pass,
       static_prune_classes);
 
   DexClassesVector outdex;
+  auto const& primary_dex = dexen[0];
 
   // We have a bunch of special logic for the primary dex which we only use if
   // we can't touch the primary dex.
@@ -493,7 +535,6 @@ DexClassesVector run_interdex(InterDexPass* pass,
     // build a separate lookup table for the primary dex, since we have to make
     // sure we keep all classes in the same dex
     dex_emit_tracker primary_det;
-    auto const& primary_dex = dexen[0];
     for (auto const& clazz : primary_dex) {
       std::string clzname(clazz->get_type()->get_name()->c_str());
       primary_det.clookup[clzname] = clazz;
@@ -537,6 +578,40 @@ DexClassesVector run_interdex(InterDexPass* pass,
   // cold-start set.  Otherwise, we calculate it on the basis of the
   // whole list.
   bool end_markers_present = false;
+
+  // NOTE: If primary dex is treated as a normal dex, we are going to modify
+  //       it too, based on cold start classes.
+  if (normal_primary_dex && interdexorder.size() > 0) {
+    // We also need to respect the primary dex classes.
+    // For all primary dex classes that are in the interdex order before
+    // any DexEndMarker, we keep it at that position. Otherwise, we add it to
+    // the head of the list.
+    std::string first_end_marker_str("DexEndMarker0.class");
+    auto first_end_marker_it = std::find(
+        interdexorder.begin(), interdexorder.end(), first_end_marker_str);
+    if (first_end_marker_it == interdexorder.end()) {
+      TRACE(IDEX, 3, "Couldn't find first dex end marker.\n");
+    }
+
+    std::vector<std::string> not_already_included;
+    for (const auto& pclass : primary_dex) {
+      const std::string& pclass_str = pclass->get_name()->str();
+      auto pclass_it = std::find(
+          interdexorder.begin(), interdexorder.end(), pclass_str);
+      if (pclass_it == interdexorder.end() || pclass_it > first_end_marker_it) {
+        TRACE(IDEX, 4, "Class %s is not in the interdex order.\n",
+              pclass_str.c_str());
+        not_already_included.push_back(std::string(pclass->c_str()));
+      } else {
+        TRACE(IDEX, 4, "Class %s is in the interdex order. "
+              "No change required.\n", pclass_str.c_str());
+      }
+    }
+    interdexorder.insert(interdexorder.begin(),
+                         not_already_included.begin(),
+                         not_already_included.end());
+  }
+
   for (auto& entry : interdexorder) {
     auto it = det.clookup.find(entry);
     if (it == det.clookup.end()) {
@@ -601,6 +676,30 @@ DexClassesVector run_interdex(InterDexPass* pass,
   if (det.outs.size()) {
     flush_out_secondary(pass, det, outdex);
   }
+
+  // Sort and emit scroll classes by value
+  typedef std::pair<DexClass*,int32_t> scroll_pair;
+  std::vector<scroll_pair> scrollVec(scroll_classes.begin(), scroll_classes.end());
+  std::sort(scrollVec.begin(),scrollVec.end(),
+    [](const scroll_pair &a, const scroll_pair & b) -> bool
+    {
+      return a.second < b.second;
+    });
+  for (auto cl_pair : scrollVec) {
+    std::string cls_name(cl_pair.first->get_type()->get_name()->c_str());
+    TRACE(IDEX, 2, " cls_name %s\n", cls_name.c_str());
+    if (!det.clookup.count(cls_name)) {
+      TRACE(IDEX, 2, "Ignoring scroll class %s as it is not found in dexes\n", SHOW(cl_pair.first));
+      continue;
+    }
+    TRACE(IDEX, 2, " Emitting scroll class: %s \n", SHOW(cl_pair.first));
+    emit_class(pass, det, outdex, cl_pair.first, false, false);
+  }
+  // Flush the scroll classes
+  if (det.outs.size()) {
+    flush_out_secondary(pass, det, outdex);
+  }
+
   TRACE(IDEX, 1, "InterDex secondary dex count %d\n", (int)(outdex.size() - 1));
   TRACE(IDEX, 1,
         "global stats: %lu mrefs, %lu frefs, %lu cls, %lu dmeth, %lu smeth, "
@@ -634,6 +733,7 @@ void InterDexPass::run_pass(DexClassesVector& dexen,
   }
   emit_canaries = m_emit_canaries;
   linear_alloc_limit = m_linear_alloc_limit;
+  scroll_classes_file = m_scroll_classes_file;
   dexen = run_interdex(
       this, dexen, cfg, true, m_static_prune, m_normal_primary_dex);
   for (const auto& plugin : m_plugins) {

@@ -9,6 +9,7 @@
 
 #include "WorkQueue.h"
 
+#include <thread>
 #include <chrono>
 #include <random>
 

@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <type_traits>
 #include <utility>
 
@@ -75,8 +77,11 @@ class AbstractDomain {
                   "Derived is not copy constructible");
     static_assert(std::is_copy_assignable<Derived>::value,
                   "Derived is not copy assignable");
-    // An abstract domain should implement the factory methods top() and
-    // bottom() that respectively produce the top and bottom values.
+    // top() and bottom() are factory methods that respectively produce the top
+    // and bottom values. We define default implementations for them in terms
+    // of set_to_{top, bottom}, but implementors may wish to override those
+    // implementations with more efficient versions. Here we check that any
+    // such overrides bear the correct method signature.
     static_assert(std::is_same<decltype(Derived::bottom()), Derived>::value,
                   "Derived::bottom() does not exist");
     static_assert(std::is_same<decltype(Derived::top()), Derived>::value,
@@ -96,6 +101,18 @@ class AbstractDomain {
    * a.equals(b) is semantically equivalent to a.leq(b) && b.leq(a).
    */
   virtual bool equals(const Derived& other) const = 0;
+
+  /*
+   * Many C++ libraries default to using operator== to check for equality,
+   * so we define it here as an alias of equals().
+   */
+  friend bool operator==(const Derived& self, const Derived& other) {
+    return self.equals(other);
+  }
+
+  friend bool operator!=(const Derived& self, const Derived& other) {
+    return !self.equals(other);
+  }
 
   /*
    * Elements of an abstract domain are mutable and the basic operations have
@@ -160,6 +177,18 @@ class AbstractDomain {
     tmp.narrow_with(other);
     return tmp;
   }
+
+  static Derived top() {
+    Derived tmp;
+    tmp.set_to_top();
+    return tmp;
+  }
+
+  static Derived bottom() {
+    Derived tmp;
+    tmp.set_to_bottom();
+    return tmp;
+  }
 };
 
 /*
@@ -170,11 +199,13 @@ class AbstractDomain {
  * elements defined by the AbstractValue interface.
  */
 
+enum class AbstractValueKind { Bottom, Value, Top };
+
 /*
  * This interface represents the structure of the regular elements of an
  * abstract domain (like a constant, an interval, a points-to set, etc.).
  * Performing operations on those regular values may yield Top or Bottom, which
- * is why we define a Kind type to identify such situations.
+ * is why we define an AbstractValueKind type to identify such situations.
  *
  * Sample usage:
  *
@@ -190,8 +221,6 @@ class AbstractDomain {
 template <typename Derived>
 class AbstractValue {
  public:
-  enum class Kind { Bottom, Value, Top };
-
   virtual ~AbstractValue() {
     static_assert(std::is_base_of<AbstractValue<Derived>, Derived>::value,
                   "Derived doesn't inherit from AbstractValue");
@@ -215,7 +244,7 @@ class AbstractValue {
    * still be represented by regular abstract values (for example [0, -1] and
    * [-oo, +oo] in the domain of intervals), hence the need for such a method.
    */
-  virtual Kind kind() const = 0;
+  virtual AbstractValueKind kind() const = 0;
 
   virtual bool leq(const Derived& other) const = 0;
 
@@ -223,17 +252,17 @@ class AbstractValue {
 
   /*
    * These are the regular abstract domain operations that perform side effects.
-   * They return a Kind value to identify situations where the result of the
-   * operation is either Top or Bottom.
+   * They return a AbstractValueKind value to identify situations where the
+   * result of the operation is either Top or Bottom.
    */
 
-  virtual Kind join_with(const Derived& other) = 0;
+  virtual AbstractValueKind join_with(const Derived& other) = 0;
 
-  virtual Kind widen_with(const Derived& other) = 0;
+  virtual AbstractValueKind widen_with(const Derived& other) = 0;
 
-  virtual Kind meet_with(const Derived& other) = 0;
+  virtual AbstractValueKind meet_with(const Derived& other) = 0;
 
-  virtual Kind narrow_with(const Derived& other) = 0;
+  virtual AbstractValueKind narrow_with(const Derived& other) = 0;
 };
 
 /*
@@ -272,8 +301,6 @@ class AbstractValue {
 template <typename Value, typename Derived>
 class AbstractDomainScaffolding : public AbstractDomain<Derived> {
  public:
-  using AbstractValueKind = typename AbstractValue<Value>::Kind;
-
   virtual ~AbstractDomainScaffolding() {
     static_assert(std::is_base_of<AbstractValue<Value>, Value>::value,
                   "Value doesn't inherit from AbstractValue");
@@ -448,6 +475,65 @@ class AbstractDomainScaffolding : public AbstractDomain<Derived> {
 
   AbstractValueKind m_kind;
   Value m_value;
+};
+
+// Implement copy on write for Value. The FixpointIterator makes lots of copies
+// of Domain objects. This class delays copying Value until we actually need to
+// (before a write). m_value is read-only until the first write operation.
+//
+// This AbstractValue is recommended whenever copying the underlying abstract
+// value incurs a significant cost
+template <typename Value>
+class CopyOnWriteAbstractValue
+    : AbstractValue<CopyOnWriteAbstractValue<Value>> {
+  using This = CopyOnWriteAbstractValue<Value>;
+
+ public:
+  void clear() override { get().clear(); }
+
+  AbstractValueKind kind() const override { return get().kind(); }
+
+  bool leq(const This& other) const override { return get().leq(other.get()); }
+
+  bool equals(const This& other) const override {
+    return get().equals(other.get());
+  }
+
+  AbstractValueKind join_with(const This& other) override {
+    return get().join_with(other.get());
+  }
+
+  AbstractValueKind widen_with(const This& other) override {
+    return get().widen_with(other.get());
+  }
+
+  AbstractValueKind meet_with(const This& other) override {
+    return get().meet_with(other.get());
+  }
+
+  AbstractValueKind narrow_with(const This& other) override {
+    return get().narrow_with(other.get());
+  }
+
+  // m_value should _only_ be accessed via `get()`
+  Value& get() {
+    upgrade_to_writer();
+    return *m_value;
+  }
+  const Value& get() const { return *m_value; }
+
+ private:
+  // WARNING: This Copy on write implementation is likely to fail with multiple
+  // concurrent accesses
+  void upgrade_to_writer() {
+    if (m_value.use_count() > 1) {
+      // need to make a copy
+      m_value = std::make_shared<Value>(*m_value);
+    }
+  }
+
+  // m_value should only be accessed via `get()`
+  std::shared_ptr<Value> m_value{std::make_shared<Value>()};
 };
 
 /*

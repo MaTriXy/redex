@@ -25,7 +25,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/opt/annokill \
 	-I$(top_srcdir)/opt/bridge \
 	-I$(top_srcdir)/opt/check_breadcrumbs \
-	-I$(top_srcdir)/opt/constant_propagation \
+	-I$(top_srcdir)/opt/constant-propagation \
 	-I$(top_srcdir)/opt/dedup_blocks \
 	-I$(top_srcdir)/opt/delinit \
 	-I$(top_srcdir)/opt/delsuper \
@@ -62,6 +62,11 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/opt/unterface \
 	-I$(top_srcdir)/opt/verifier \
 	-I$(top_srcdir)/opt/virtual_scope \
+	-I$(top_srcdir)/service/constant-propagation \
+	-I$(top_srcdir)/service/dataflow \
+  -I$(top_srcdir)/service/reference-update \
+  -I$(top_srcdir)/service/switch-dispatch \
+	-I$(top_srcdir)/shared \
 	-I$(top_srcdir)/tools/common \
 	-I$(top_srcdir)/tools/redexdump \
 	-I$(top_srcdir)/util \
@@ -74,6 +79,7 @@ noinst_LTLIBRARIES = libredex.la
 
 libredex_la_SOURCES = \
 	liblocator/locator.cpp \
+	libredex/ApkManager.cpp \
 	libredex/CallGraph.cpp \
 	libredex/ClassHierarchy.cpp \
 	libredex/ConfigFiles.cpp \
@@ -83,6 +89,7 @@ libredex_la_SOURCES = \
 	libredex/DexAnnotation.cpp \
 	libredex/DexClass.cpp \
 	libredex/DexDebugInstruction.cpp \
+	libredex/DexEncoding.cpp \
 	libredex/DexIdx.cpp \
 	libredex/DexLoader.cpp \
 	libredex/DexInstruction.cpp \
@@ -98,6 +105,7 @@ libredex_la_SOURCES = \
 	libredex/IRAssembler.cpp \
 	libredex/IRCode.cpp \
 	libredex/IRInstruction.cpp \
+	libredex/IRList.cpp \
 	libredex/IROpcode.cpp \
 	libredex/IRTypeChecker.cpp \
 	libredex/JarLoader.cpp \
@@ -142,6 +150,7 @@ libredex_la_SOURCES = \
 	libresource/TypeWrappers.cpp \
 	libresource/Unicode.cpp \
 	libresource/VectorImpl.cpp \
+	shared/DexDefs.cpp \
 	util/Sha1.cpp
 
 libredex_la_LIBADD = \
@@ -149,6 +158,7 @@ libredex_la_LIBADD = \
 	$(BOOST_SYSTEM_LIB) \
 	$(BOOST_REGEX_LIB) \
 	$(BOOST_IOSTREAMS_LIB) \
+	$(BOOST_THREAD_LIB) \
 	-lpthread
 
 #
@@ -165,11 +175,12 @@ redex_all_SOURCES = \
 	opt/annokill/AnnoKill.cpp \
 	opt/bridge/Bridge.cpp \
 	opt/check_breadcrumbs/CheckBreadcrumbs.cpp \
-	opt/constant_propagation/ConstantPropagation.cpp \
-	opt/constant_propagation/ConstantEnvironment.cpp \
-	opt/constant_propagation/InterproceduralConstantPropagation.cpp \
-	opt/constant_propagation/SignDomain.cpp \
-	opt/constant_propagation/LocalConstProp.cpp \
+	opt/constant-propagation/ConstantPropagation.cpp \
+	opt/constant-propagation/ConstantPropagationRuntimeAssert.cpp \
+	opt/constant-propagation/ConstantPropagationTransform.cpp \
+	opt/constant-propagation/ConstantPropagationWholeProgramState.cpp \
+	opt/constant-propagation/IPConstantPropagation.cpp \
+	opt/constant-propagation/IPConstantPropagationAnalysis.cpp \
 	opt/copy-propagation/AliasedRegisters.cpp \
 	opt/copy-propagation/CopyPropagationPass.cpp \
 	opt/dedup_blocks/DedupBlocksPass.cpp \
@@ -192,7 +203,6 @@ redex_all_SOURCES = \
 	opt/rebindrefs/ReBindRefs.cpp \
 	opt/regalloc/GraphColoring.cpp \
 	opt/regalloc/Interference.cpp \
-	opt/regalloc/LiveRange.cpp \
 	opt/regalloc/RegAlloc.cpp \
 	opt/regalloc/RegisterType.cpp \
 	opt/regalloc/Split.cpp \
@@ -200,6 +210,7 @@ redex_all_SOURCES = \
 	opt/remove-builders/RemoveBuilders.cpp \
 	opt/remove-builders/RemoveBuildersHelper.cpp \
 	opt/remove-unreachable/RemoveUnreachable.cpp \
+	opt/remove-unread-fields/RemoveUnreadFields.cpp \
 	opt/remove_empty_classes/RemoveEmptyClasses.cpp \
 	opt/remove_gotos/RemoveGotos.cpp \
 	opt/renameclasses/RenameClasses.cpp \
@@ -226,6 +237,14 @@ redex_all_SOURCES = \
 	opt/unterface/UnterfaceOpt.cpp \
 	opt/verifier/Verifier.cpp \
 	opt/virtual_scope/MethodDevirtualizationPass.cpp \
+	service/constant-propagation/ConstantEnvironment.cpp \
+	service/constant-propagation/ConstantPropagationAnalysis.cpp \
+	service/constant-propagation/ObjectDomain.cpp \
+	service/constant-propagation/SignDomain.cpp \
+	service/dataflow/LiveRange.cpp \
+  service/reference-update/MethodReference.cpp \
+  service/reference-update/TypeReference.cpp \
+  service/switch-dispatch/SwitchDispatch.cpp \
 	tools/redex-all/main.cpp
 
 redex_all_LDADD = \
@@ -234,6 +253,7 @@ redex_all_LDADD = \
 	$(BOOST_SYSTEM_LIB) \
 	$(BOOST_REGEX_LIB) \
 	$(BOOST_PROGRAM_OPTIONS_LIB) \
+	$(BOOST_THREAD_LIB) \
 	-lpthread
 
 redex_all_LDFLAGS = \
@@ -251,6 +271,7 @@ redexdump_LDADD = \
 	$(BOOST_FILESYSTEM_LIB) \
 	$(BOOST_SYSTEM_LIB) \
 	$(BOOST_REGEX_LIB) \
+	$(BOOST_THREAD_LIB) \
 	-lpthread
 
 #

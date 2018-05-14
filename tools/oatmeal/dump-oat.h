@@ -9,14 +9,14 @@
 
 #pragma once
 
-#include "util.h"
+#include "OatmealUtil.h"
+#include "DexDefs.h"
 
 #include <memory>
 #include <string>
 #include <vector>
 
 constexpr uint32_t kOatMagicNum = 0x0a74616F;
-constexpr uint32_t kVdexMagicNum = 0x78656476;
 
 enum class OatVersion : uint32_t {
   UNKNOWN = 0,
@@ -110,7 +110,8 @@ class OatFile {
                       const std::string& arch,
                       bool write_elf,
                       const std::string& art_image_location,
-                      bool samsung_mode);
+                      bool samsung_mode,
+                      const std::string& quick_data_location);
 };
 
 enum class InstructionSet {
@@ -161,3 +162,23 @@ inline InstructionSet instruction_set(const std::string& isa) {
   }
   return InstructionSet::kMax;
 }
+
+class DexFileListing {
+ public:
+  struct DexFile {
+    DexFile() = default;
+    DexFile(const std::string& location_,
+            uint32_t location_checksum_,
+            uint32_t file_offset_)
+        : location(location_),
+          location_checksum(location_checksum_),
+          file_offset(file_offset_) {}
+
+    std::string location;
+    uint32_t location_checksum;
+    uint32_t file_offset;
+  };
+
+  virtual std::vector<uint32_t> dex_file_offsets() const = 0;
+  virtual ~DexFileListing() = default;
+};

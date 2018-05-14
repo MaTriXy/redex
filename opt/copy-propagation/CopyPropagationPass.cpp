@@ -77,7 +77,7 @@ class AliasFixpointIterator final
   Stats& m_stats;
 
   AliasFixpointIterator(
-      ControlFlowGraph& cfg,
+      cfg::ControlFlowGraph& cfg,
       const CopyPropagationPass::Config& config,
       const std::unordered_set<const IRInstruction*>& range_set,
       Stats& stats)
@@ -93,7 +93,7 @@ class AliasFixpointIterator final
   // if deletes is not null, this time is for real.
   // fill the `deletes` vector with redundant instructions
   // if deletes is null, analyze only. Make no changes to the code.
-  void run_on_block(Block* block,
+  void run_on_block(cfg::Block* block,
                     AliasedRegisters& aliases,
                     std::unordered_set<IRInstruction*>* deletes) const {
 
@@ -119,7 +119,8 @@ class AliasFixpointIterator final
               // WARNING: This assumes that the primary instruction of a
               // move-result-pseudo has no side effects.
               deletes->insert(
-                  primary_instruction_of_move_result_pseudo(it.unwrap()));
+                  ir_list::primary_instruction_of_move_result_pseudo(
+                      it.unwrap()));
             } else {
               deletes->insert(insn);
             }
@@ -246,8 +247,8 @@ class AliasFixpointIterator final
   // ALL destinations must be returned by this method (unlike get_src_value) if
   // we miss a destination register, we'll fail to clobber it and think we know
   // that a register holds a stale value.
-  RegisterPair get_dest_reg(InstructionIterator it,
-                            InstructionIterator end) const {
+  RegisterPair get_dest_reg(ir_list::InstructionIterator it,
+                            ir_list::InstructionIterator end) const {
     IRInstruction* insn = it->insn;
     RegisterPair dest;
 
@@ -353,7 +354,7 @@ class AliasFixpointIterator final
     return source;
   }
 
-  void analyze_node(Block* const& node,
+  void analyze_node(cfg::Block* const& node,
                     AliasDomain* current_state) const override {
     current_state->update([&](AliasedRegisters& aliases) {
       run_on_block(node, aliases, nullptr);

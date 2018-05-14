@@ -16,6 +16,7 @@
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -38,6 +39,20 @@ struct Tracer {
     if (!traceenv) {
       return;
     }
+
+    std::cerr << "Trace settings:" << std::endl;
+    std::cerr << "TRACEFILE=" << (envfile == nullptr ? "" : envfile)
+              << std::endl;
+    std::cerr << "SHOW_TIMESTAMPS="
+              << (show_timestamps == nullptr ? "" : show_timestamps)
+              << std::endl;
+    std::cerr << "SHOW_TRACEMODULE="
+              << (show_tracemodule == nullptr ? "" : show_tracemodule)
+              << std::endl;
+    std::cerr << "TRACE_METHOD_FILTER="
+              << (m_method_filter == nullptr ? "" : m_method_filter)
+              << std::endl;
+
     init_trace_modules(traceenv);
     init_trace_file(envfile);
 
@@ -64,8 +79,8 @@ struct Tracer {
   }
 
   void trace(TraceModule module, int level, const char* fmt, va_list ap) {
-    if (m_method_filter && !TraceContext::s_current_method.empty()) {
-      if (strstr(TraceContext::s_current_method.c_str(), m_method_filter) ==
+    if (m_method_filter && TraceContext::s_current_method != nullptr) {
+      if (strstr(TraceContext::s_current_method->c_str(), m_method_filter) ==
           nullptr) {
         return;
       }
@@ -170,5 +185,5 @@ void trace(TraceModule module, int level, const char* fmt, ...) {
   va_end(ap);
 }
 
-thread_local std::string TraceContext::s_current_method;
+thread_local const std::string* TraceContext::s_current_method = nullptr;
 std::mutex TraceContext::s_trace_mutex;

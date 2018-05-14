@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <sstream>
 #include <type_traits>
 #include <utility>
 
@@ -16,6 +17,7 @@
 
 #include "AbstractDomain.h"
 #include "Debug.h"
+#include "Show.h"
 
 /*
  * This abstract domain combinator constructs the lattice of constants of a
@@ -45,8 +47,6 @@ template <typename Constant>
 class ConstantAbstractValue final
     : public AbstractValue<ConstantAbstractValue<Constant>> {
  public:
-  using Kind = typename AbstractValue<ConstantAbstractValue>::Kind;
-
   ~ConstantAbstractValue() {
     static_assert(std::is_default_constructible<Constant>::value,
                   "Constant is not default constructible");
@@ -63,7 +63,7 @@ class ConstantAbstractValue final
 
   void clear() override {}
 
-  Kind kind() const override { return Kind::Value; }
+  AbstractValueKind kind() const override { return AbstractValueKind::Value; }
 
   bool leq(const ConstantAbstractValue& other) const override {
     return equals(other);
@@ -73,25 +73,25 @@ class ConstantAbstractValue final
     return m_constant == other.get_constant();
   }
 
-  Kind join_with(const ConstantAbstractValue& other) override {
+  AbstractValueKind join_with(const ConstantAbstractValue& other) override {
     if (equals(other)) {
-      return Kind::Value;
+      return AbstractValueKind::Value;
     }
-    return Kind::Top;
+    return AbstractValueKind::Top;
   }
 
-  Kind widen_with(const ConstantAbstractValue& other) override {
+  AbstractValueKind widen_with(const ConstantAbstractValue& other) override {
     return join_with(other);
   }
 
-  Kind meet_with(const ConstantAbstractValue& other) override {
+  AbstractValueKind meet_with(const ConstantAbstractValue& other) override {
     if (equals(other)) {
-      return Kind::Value;
+      return AbstractValueKind::Value;
     }
-    return Kind::Bottom;
+    return AbstractValueKind::Bottom;
   }
 
-  Kind narrow_with(const ConstantAbstractValue& other) override {
+  AbstractValueKind narrow_with(const ConstantAbstractValue& other) override {
     return meet_with(other);
   }
 
@@ -109,8 +109,7 @@ class ConstantAbstractDomain final
           acd_impl::ConstantAbstractValue<Constant>,
           ConstantAbstractDomain<Constant>> {
  public:
-  using AbstractValueKind =
-      typename acd_impl::ConstantAbstractValue<Constant>::Kind;
+  using ConstantType = Constant;
 
   ConstantAbstractDomain() { this->set_to_top(); }
 
@@ -140,17 +139,16 @@ class ConstantAbstractDomain final
 template <typename Constant>
 inline std::ostream& operator<<(std::ostream& out,
                                 const ConstantAbstractDomain<Constant>& x) {
-  using Kind = typename acd_impl::ConstantAbstractValue<Constant>::Kind;
   switch (x.kind()) {
-  case Kind::Bottom: {
+  case AbstractValueKind::Bottom: {
     out << "_|_";
     break;
   }
-  case Kind::Top: {
+  case AbstractValueKind::Top: {
     out << "T";
     break;
   }
-  case Kind::Value: {
+  case AbstractValueKind::Value: {
     out << *x.get_constant();
     break;
   }

@@ -11,6 +11,7 @@
 
 #include <boost/dynamic_bitset.hpp>
 
+#include "ControlFlow.h"
 #include "DexClass.h"
 #include "IRInstruction.h"
 #include "Inliner.h"
@@ -85,7 +86,7 @@ void transfer_object_reach(DexType* object,
 
 std::unique_ptr<std::unordered_map<IRInstruction*, TaintedRegs>>
 get_tainted_regs(uint16_t regs_size,
-                 const std::vector<Block*>& blocks,
+                 const std::vector<cfg::Block*>& blocks,
                  DexType* type);
 
 class BuilderTransform {

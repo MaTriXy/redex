@@ -12,7 +12,7 @@
 #include <cstddef>
 #include <functional>
 #include <initializer_list>
-#include <iostream>
+#include <sstream>
 #include <tuple>
 #include <type_traits>
 
@@ -209,18 +209,6 @@ class ReducedProductAbstractDomain : public AbstractDomain<Derived> {
         m_product);
   }
 
-  void join_with(const Derived& other_domain) override {
-    combine_with(other_domain,
-                 [](auto&& self, auto&& other) { self.join_with(other); },
-                 /* smash_bottom */ false);
-  }
-
-  void widen_with(const Derived& other_domain) override {
-    combine_with(other_domain,
-                 [](auto&& self, auto&& other) { self.widen_with(other); },
-                 /* smash_bottom */ false);
-  }
-
   // We leave the Meet and Narrowing methods virtual, because one might want
   // to refine the result of these operations by applying reduce(). The default
   // implementation doesn't call reduce() as it might be too costly to perform
@@ -237,6 +225,31 @@ class ReducedProductAbstractDomain : public AbstractDomain<Derived> {
     combine_with(other_domain,
                  [](auto&& self, auto&& other) { self.narrow_with(other); },
                  /* smash_bottom */ true);
+  }
+
+  // reduce() should only refine (lower) a given component of a product based on
+  // the information in the other components. As such, it only makes sense to
+  // call reduce() after meet/narrow -- operations which can refine the
+  // components of a product. However, we may still need to canonicalize our
+  // product after a join/widen, so these methods are virtual as well.
+
+  virtual void join_with(const Derived& other_domain) override {
+    combine_with(other_domain,
+                 [](auto&& self, auto&& other) { self.join_with(other); },
+                 /* smash_bottom */ false);
+  }
+
+  virtual void widen_with(const Derived& other_domain) override {
+    combine_with(other_domain,
+                 [](auto&& self, auto&& other) { self.widen_with(other); },
+                 /* smash_bottom */ false);
+  }
+
+  friend std::ostream& operator<<(std::ostream& o, const Derived& p) {
+    o << "(";
+    tuple_print(o, p.m_product);
+    o << ")";
+    return o;
   }
 
  private:
@@ -325,35 +338,21 @@ class ReducedProductAbstractDomain : public AbstractDomain<Derived> {
     combine_with<Index + 1>(other, operation, smash_bottom);
   }
 
+  template <class Tuple, std::size_t... I>
+  static void tuple_print_impl(std::ostream& o,
+                               Tuple&& t,
+                               std::index_sequence<I...>) {
+    int UNUSED print[] = {
+        0, (void(o << (I == 0 ? "" : ", ") << std::get<I>(t)), 0)...};
+  }
+
+  template <class Tuple>
+  static void tuple_print(std::ostream& o, Tuple&& t) {
+    return tuple_print_impl(
+        o,
+        std::forward<Tuple>(t),
+        std::make_index_sequence<std::tuple_size<std::decay_t<Tuple>>{}>{});
+  }
+
   std::tuple<Domains...> m_product;
-
-  template <typename T, typename... Ts>
-  friend std::ostream& operator<<(
-      std::ostream& o, const ReducedProductAbstractDomain<T, Ts...>& p);
 };
-
-namespace {
-template <class Tuple, std::size_t... I>
-void tuple_print_impl(std::ostream& o, Tuple&& t, std::index_sequence<I...>) {
-  int UNUSED print[] = {
-      0, (void(o << (I == 0 ? "" : ", ") << std::get<I>(t)), 0)...};
-}
-
-template <class Tuple>
-void tuple_print(std::ostream& o, Tuple&& t) {
-  return tuple_print_impl(
-      o,
-      std::forward<Tuple>(t),
-      std::make_index_sequence<std::tuple_size<std::decay_t<Tuple>>{}>{});
-}
-}
-
-template <typename Derived, typename... Domains>
-std::ostream& operator<<(
-    std::ostream& o,
-    const ReducedProductAbstractDomain<Derived, Domains...>& p) {
-  o << "(";
-  tuple_print(o, p.m_product);
-  o << ")";
-  return o;
-}
