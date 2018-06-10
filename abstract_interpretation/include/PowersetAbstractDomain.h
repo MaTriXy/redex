@@ -11,12 +11,11 @@
 
 #include <cstddef>
 #include <initializer_list>
-#include <iostream>
+#include <ostream>
 #include <sstream>
 #include <type_traits>
 
 #include "AbstractDomain.h"
-#include "Debug.h"
 
 /*
  * The definition of an abstract value belonging to a powerset abstract domain.
@@ -93,12 +92,18 @@ class PowersetAbstractDomain
       : AbstractDomainScaffolding<Powerset, Derived>(kind) {}
 
   Snapshot elements() const {
-    always_assert(this->kind() == AbstractValueKind::Value);
+    RUNTIME_CHECK(this->kind() == AbstractValueKind::Value,
+                  invalid_abstract_value()
+                      << expected_kind(AbstractValueKind::Value)
+                      << actual_kind(this->kind()));
     return this->get_value()->elements();
   }
 
   size_t size() const {
-    always_assert(this->kind() == AbstractValueKind::Value);
+    RUNTIME_CHECK(this->kind() == AbstractValueKind::Value,
+                  invalid_abstract_value()
+                      << expected_kind(AbstractValueKind::Value)
+                      << actual_kind(this->kind()));
     return this->get_value()->size();
   }
 
@@ -158,37 +163,22 @@ class PowersetAbstractDomain
     }
     }
   }
-};
 
-template <typename Element,
-          typename Powerset,
-          typename Snapshot,
-          typename Derived>
-inline std::ostream& operator<<(
-    std::ostream& o,
-    const PowersetAbstractDomain<Element, Powerset, Snapshot, Derived>& s) {
-  switch (s.kind()) {
-  case AbstractValueKind::Bottom: {
-    o << "_|_";
-    break;
-  }
-  case AbstractValueKind::Top: {
-    o << "T";
-    break;
-  }
-  case AbstractValueKind::Value: {
-    o << "[#" << s.size() << "]";
-    o << "{";
-    auto& elements = s.elements();
-    for (auto it = elements.begin(); it != elements.end();) {
-      o << *it++;
-      if (it != elements.end()) {
-        o << ", ";
-      }
+  friend std::ostream& operator<<(std::ostream& o, const Derived& s) {
+    switch (s.kind()) {
+    case AbstractValueKind::Bottom: {
+      o << "_|_";
+      break;
     }
-    o << "}";
-    break;
+    case AbstractValueKind::Top: {
+      o << "T";
+      break;
+    }
+    case AbstractValueKind::Value: {
+      o << *s.get_value();
+      break;
+    }
+    }
+    return o;
   }
-  }
-  return o;
-}
+};

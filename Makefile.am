@@ -9,6 +9,7 @@ AM_CXXFLAGS = --std=gnu++14 -O3 -Wall -g
 # Include paths
 #
 AM_CPPFLAGS = \
+	-I$(top_srcdir)/abstract_interpretation/include \
 	-I$(top_srcdir)/liblocator \
 	-I$(top_srcdir)/libredex \
 	-I$(top_srcdir)/libresource \
@@ -32,6 +33,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/opt/final_inline \
 	-I$(top_srcdir)/opt/hotness-score \
 	-I$(top_srcdir)/opt/inlineinit \
+	-I$(top_srcdir)/opt/instrument \
 	-I$(top_srcdir)/opt/interdex \
 	-I$(top_srcdir)/opt/local-dce \
 	-I$(top_srcdir)/opt/obfuscate \
@@ -64,8 +66,8 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/opt/virtual_scope \
 	-I$(top_srcdir)/service/constant-propagation \
 	-I$(top_srcdir)/service/dataflow \
-  -I$(top_srcdir)/service/reference-update \
-  -I$(top_srcdir)/service/switch-dispatch \
+	-I$(top_srcdir)/service/reference-update \
+	-I$(top_srcdir)/service/switch-dispatch \
 	-I$(top_srcdir)/shared \
 	-I$(top_srcdir)/tools/common \
 	-I$(top_srcdir)/tools/redexdump \
@@ -151,6 +153,7 @@ libredex_la_SOURCES = \
 	libresource/Unicode.cpp \
 	libresource/VectorImpl.cpp \
 	shared/DexDefs.cpp \
+	shared/file-utils.cpp \
 	util/Sha1.cpp
 
 libredex_la_LIBADD = \
@@ -178,9 +181,7 @@ redex_all_SOURCES = \
 	opt/constant-propagation/ConstantPropagation.cpp \
 	opt/constant-propagation/ConstantPropagationRuntimeAssert.cpp \
 	opt/constant-propagation/ConstantPropagationTransform.cpp \
-	opt/constant-propagation/ConstantPropagationWholeProgramState.cpp \
 	opt/constant-propagation/IPConstantPropagation.cpp \
-	opt/constant-propagation/IPConstantPropagationAnalysis.cpp \
 	opt/copy-propagation/AliasedRegisters.cpp \
 	opt/copy-propagation/CopyPropagationPass.cpp \
 	opt/dedup_blocks/DedupBlocksPass.cpp \
@@ -189,6 +190,7 @@ redex_all_SOURCES = \
 	opt/final_inline/FinalInline.cpp \
 	opt/hotness-score/HotnessScore.cpp \
 	opt/inlineinit/InlineInit.cpp \
+	opt/instrument/Instrument.cpp \
 	opt/interdex/InterDex.cpp \
 	opt/local-dce/LocalDce.cpp \
 	opt/obfuscate/Obfuscate.cpp \
@@ -239,12 +241,14 @@ redex_all_SOURCES = \
 	opt/virtual_scope/MethodDevirtualizationPass.cpp \
 	service/constant-propagation/ConstantEnvironment.cpp \
 	service/constant-propagation/ConstantPropagationAnalysis.cpp \
+	service/constant-propagation/ConstantPropagationWholeProgramState.cpp \
+	service/constant-propagation/IPConstantPropagationAnalysis.cpp \
 	service/constant-propagation/ObjectDomain.cpp \
 	service/constant-propagation/SignDomain.cpp \
 	service/dataflow/LiveRange.cpp \
-  service/reference-update/MethodReference.cpp \
-  service/reference-update/TypeReference.cpp \
-  service/switch-dispatch/SwitchDispatch.cpp \
+	service/reference-update/MethodReference.cpp \
+	service/reference-update/TypeReference.cpp \
+	service/switch-dispatch/SwitchDispatch.cpp \
 	tools/redex-all/main.cpp
 
 redex_all_LDADD = \

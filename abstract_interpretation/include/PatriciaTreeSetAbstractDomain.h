@@ -13,7 +13,6 @@
 #include <initializer_list>
 #include <unordered_set>
 
-#include "Debug.h"
 #include "PatriciaTreeSet.h"
 #include "PowersetAbstractDomain.h"
 
@@ -67,6 +66,12 @@ class SetValue final
   AbstractValueKind meet_with(const SetValue& other) override {
     m_set.intersection_with(other.m_set);
     return AbstractValueKind::Value;
+  }
+
+  friend std::ostream& operator<<(std::ostream& o, const SetValue& value) {
+    o << "[#" << value.size() << "]";
+    o << value.m_set;
+    return o;
   }
 
  private:

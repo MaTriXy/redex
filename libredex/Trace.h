@@ -22,7 +22,6 @@
   TM(BIND)               \
   TM(BRIDGE)             \
   TM(BUILDERS)           \
-  TM(COMP_BUILDERS)      \
   TM(CFG)                \
   TM(CFP)                \
   TM(CLP_GQL)            \
@@ -43,15 +42,18 @@
   TM(HOTNESS)            \
   TM(ICONSTP)            \
   TM(IDEX)               \
+  TM(GETTER)             \
   TM(INL)                \
   TM(INLINIT)            \
   TM(INLRES)             \
+  TM(INSTRUMENT)         \
   TM(INTF)               \
   TM(LITHO_BLD)          \
   TM(LOC)                \
   TM(MAGIC_FIELDS)       \
   TM(MAIN)               \
   TM(MMINL)              \
+  TM(MMODE)               \
   TM(MORTIROLO)          \
   TM(MTRANS)             \
   TM(OBFUSCATE)          \

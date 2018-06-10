@@ -102,6 +102,8 @@ DexProto* update_proto_reference(
     auto merger_type = old_to_new.at(rtype);
     rtype = is_array(proto->get_rtype()) ? make_array_type(merger_type)
                                          : const_cast<DexType*>(merger_type);
+  } else {
+    rtype = proto->get_rtype();
   }
   std::deque<DexType*> lst;
   for (const auto arg_type : proto->get_args()->get_type_list()) {
@@ -222,6 +224,34 @@ void update_method_signature_type_references(
   }
   // Last resort. Fix colliding methods for non-virtuals.
   fix_colliding_method(scope, colliding_methods);
+}
+
+void update_field_type_references(
+    const Scope& scope,
+    const std::unordered_map<const DexType*, DexType*>& old_to_new) {
+  TRACE(REFU, 4, " updating field refs\n");
+  const auto update_fields = [&](const std::vector<DexField*>& fields) {
+    for (const auto field : fields) {
+      const auto ref_type = field->get_type();
+      const auto type =
+          is_array(ref_type) ? get_array_type(ref_type) : ref_type;
+      if (old_to_new.count(type) == 0) {
+        continue;
+      }
+      DexFieldSpec spec;
+      auto new_type = old_to_new.at(type);
+      auto new_type_incl_array =
+          is_array(ref_type) ? make_array_type(new_type) : new_type;
+      spec.type = new_type_incl_array;
+      field->change(spec);
+      TRACE(REFU, 9, " updating field ref to %s\n", SHOW(type));
+    }
+  };
+
+  for (const auto cls : scope) {
+    update_fields(cls->get_ifields());
+    update_fields(cls->get_sfields());
+  }
 }
 
 } // namespace type_reference

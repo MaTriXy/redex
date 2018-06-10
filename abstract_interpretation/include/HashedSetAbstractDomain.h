@@ -13,7 +13,6 @@
 #include <initializer_list>
 #include <unordered_set>
 
-#include "Debug.h"
 #include "PowersetAbstractDomain.h"
 
 template <typename Element, typename Hash, typename Equal>
@@ -84,6 +83,20 @@ class SetValue final : public PowersetImplementation<
       }
     }
     return AbstractValueKind::Value;
+  }
+
+  friend std::ostream& operator<<(std::ostream& o, const SetValue& value) {
+    o << "[#" << value.size() << "]";
+    const auto& elements = value.elements();
+    o << "{";
+    for (auto it = elements.begin(); it != elements.end();) {
+      o << *it++;
+      if (it != elements.end()) {
+        o << ", ";
+      }
+    }
+    o << "}";
+    return o;
   }
 
  private:
