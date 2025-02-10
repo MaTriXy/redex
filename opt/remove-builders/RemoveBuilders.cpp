@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "RemoveBuilders.h"
@@ -12,9 +10,11 @@
 #include <boost/regex.hpp>
 #include <tuple>
 
+#include "ConfigFiles.h"
 #include "Dataflow.h"
 #include "DexUtil.h"
 #include "IRCode.h"
+#include "PassManager.h"
 #include "RemoveBuildersHelper.h"
 #include "Resolver.h"
 #include "Walkers.h"
@@ -48,11 +48,10 @@ bool this_arg_escapes(DexMethod* method, bool enable_buildee_constr_change) {
   always_assert(this_insn->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
   auto regs_size = code->get_registers_size();
   auto this_cls = method->get_class();
-  code->build_cfg();
-  auto blocks = cfg::postorder_sort(code->cfg().blocks());
-  std::reverse(blocks.begin(), blocks.end());
+  code->build_cfg(/* editable */ false);
+  const auto& blocks = code->cfg().blocks_reverse_post_deprecated();
   std::function<void(IRList::iterator, TaintedRegs*)> trans =
-      [&](IRList::iterator it, TaintedRegs* tregs) {
+      [&](const IRList::iterator& it, TaintedRegs* tregs) {
         auto* insn = it->insn;
         if (insn == this_insn) {
           tregs->m_reg_set[insn->dest()] = 1;
@@ -77,7 +76,7 @@ bool this_arg_escapes(DexClass* cls, bool enable_buildee_constr_change) {
         this_arg_escapes(m, enable_buildee_constr_change)) {
       TRACE(BUILDERS,
             3,
-            "this escapes in %s\n",
+            "this escapes in %s",
             m->get_deobfuscated_name().c_str());
       result = true;
     }
@@ -89,7 +88,7 @@ bool this_arg_escapes(DexClass* cls, bool enable_buildee_constr_change) {
     if (this_arg_escapes(m, enable_buildee_constr_change)) {
       TRACE(BUILDERS,
             3,
-            "this escapes in %s\n",
+            "this escapes in %s",
             m->get_deobfuscated_name().c_str());
       result = true;
     }
@@ -133,9 +132,9 @@ std::unordered_set<DexClass*> get_trivial_builders(
 
     // Filter out builders that do "extra work".
     bool has_static_methods =
-        get_static_methods(builder_class->get_dmethods()).size() != 0;
+        !get_static_methods(builder_class->get_dmethods()).empty();
 
-    if (has_static_methods || builder_class->get_sfields().size()) {
+    if (has_static_methods || !builder_class->get_sfields().empty()) {
       continue;
     }
 
@@ -216,9 +215,8 @@ bool RemoveBuildersPass::escapes_stack(DexType* builder, DexMethod* method) {
   always_assert(method != nullptr);
 
   auto code = method->get_code();
-  code->build_cfg();
-  auto blocks = cfg::postorder_sort(code->cfg().blocks());
-  std::reverse(blocks.begin(), blocks.end());
+  code->build_cfg(/* editable */ false);
+  const auto& blocks = code->cfg().blocks_reverse_post_deprecated();
   auto regs_size = method->get_code()->get_registers_size();
   auto taint_map = get_tainted_regs(regs_size, blocks, builder);
   return tainted_reg_escapes(
@@ -226,20 +224,12 @@ bool RemoveBuildersPass::escapes_stack(DexType* builder, DexMethod* method) {
 }
 
 void RemoveBuildersPass::run_pass(DexStoresVector& stores,
-                                  ConfigFiles&,
+                                  ConfigFiles& conf,
                                   PassManager& mgr) {
-  if (mgr.no_proguard_rules()) {
-    TRACE(BUILDERS,
-          1,
-          "RemoveBuildersPass did not run because no Proguard configuration "
-          "was provided.");
-    return;
-  }
-
   // Initialize couters.
   b_counter = {0, 0, 0, 0};
 
-  auto obj_type = get_object_type();
+  auto obj_type = type::java_lang_Object();
   auto scope = build_class_scope(stores);
   for (DexClass* cls : scope) {
     if (is_annotation(cls) || is_interface(cls) ||
@@ -259,7 +249,7 @@ void RemoveBuildersPass::run_pass(DexStoresVector& stores,
       if (escapes_stack(builder, m)) {
         TRACE(BUILDERS,
               3,
-              "%s escapes in %s\n",
+              "%s escapes in %s",
               SHOW(builder),
               m->get_deobfuscated_name().c_str());
         escaped_builders.emplace(builder);
@@ -331,8 +321,13 @@ void RemoveBuildersPass::run_pass(DexStoresVector& stores,
   std::unordered_set<DexClass*> kept_builders =
       get_builders_with_subclasses(scope);
 
-  PassConfig pc(mgr.get_config());
-  BuilderTransform b_transform(pc, scope, stores, false);
+  init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
+      scope, conf.create_init_class_insns());
+  BuilderTransform b_transform(init_classes_with_side_effects,
+                               conf.get_inliner_config(),
+                               scope,
+                               stores,
+                               false);
 
   // Inline non init methods.
   std::unordered_set<DexClass*> removed_builders;
@@ -350,6 +345,10 @@ void RemoveBuildersPass::run_pass(DexStoresVector& stores,
       if (kept_builders.find(builder_cls) != kept_builders.end()) {
         continue;
       }
+      if (m_blocklist.find(builder) != m_blocklist.end()) {
+        TRACE(BUILDERS, 2, "Skipping excluded type %s", SHOW(builder));
+        continue;
+      }
 
       // Check it is a trivial one.
       if (trivial_builders.find(builder_cls) != trivial_builders.end()) {
@@ -357,7 +356,7 @@ void RemoveBuildersPass::run_pass(DexStoresVector& stores,
         DexMethod* method_copy = DexMethod::make_method_from(
             method,
             method->get_class(),
-            DexString::make_string(std::string(method->get_name()->c_str()) +
+            DexString::make_string(method->get_name()->str() +
                                    "$redex_builders"));
         bool was_not_removed =
             !b_transform.inline_methods(
@@ -373,6 +372,7 @@ void RemoveBuildersPass::run_pass(DexStoresVector& stores,
         }
 
         DexMethod::erase_method(method_copy);
+        DexMethod::delete_method_DO_NOT_USE(method_copy);
       }
     }
   });
@@ -389,21 +389,23 @@ void RemoveBuildersPass::run_pass(DexStoresVector& stores,
   mgr.incr_metric(METRIC_FIELDS_REMOVED, b_counter.fields_removed);
   mgr.incr_metric(METRIC_METHODS_CLEARED, b_counter.methods_cleared);
 
-  TRACE(BUILDERS, 1, "Total builders: %d\n", m_builders.size());
-  TRACE(BUILDERS, 1, "Stack-only builders: %d\n", stack_only_builders.size());
+  TRACE(BUILDERS, 1, "Total builders: %zu", m_builders.size());
+  TRACE(BUILDERS, 1, "Stack-only builders: %zu", stack_only_builders.size());
   TRACE(BUILDERS,
         1,
-        "Stack-only builders that don't let `this` escape: %d\n",
+        "Stack-only builders that don't let `this` escape: %zu",
         no_escapes.size());
-  TRACE(BUILDERS, 1, "Stats for unescaping builders:\n");
-  TRACE(BUILDERS, 1, "\tdmethods: %d\n", dmethod_count);
-  TRACE(BUILDERS, 1, "\tvmethods: %d\n", vmethod_count);
-  TRACE(BUILDERS, 1, "\tbuild methods: %d\n", build_count);
-  TRACE(BUILDERS, 1, "Trivial builders: %d\n", trivial_builders.size());
-  TRACE(BUILDERS, 1, "Classes removed: %d\n", b_counter.classes_removed);
-  TRACE(BUILDERS, 1, "Methods removed: %d\n", b_counter.methods_removed);
-  TRACE(BUILDERS, 1, "Fields removed: %d\n", b_counter.fields_removed);
-  TRACE(BUILDERS, 1, "Methods cleared: %d\n", b_counter.methods_cleared);
+  TRACE(BUILDERS, 1, "Stats for unescaping builders:");
+  TRACE(BUILDERS, 1, "\tdmethods: %zu", dmethod_count);
+  TRACE(BUILDERS, 1, "\tvmethods: %zu", vmethod_count);
+  TRACE(BUILDERS, 1, "\tbuild methods: %zu", build_count);
+  TRACE(BUILDERS, 1, "Trivial builders: %zu", trivial_builders.size());
+  TRACE(BUILDERS, 1, "Classes removed: %zu", b_counter.classes_removed);
+  TRACE(BUILDERS, 1, "Methods removed: %zu", b_counter.methods_removed);
+  TRACE(BUILDERS, 1, "Fields removed: %zu", b_counter.fields_removed);
+  TRACE(BUILDERS, 1, "Methods cleared: %zu", b_counter.methods_cleared);
+
+  b_transform.flush();
 }
 
 static RemoveBuildersPass s_pass;

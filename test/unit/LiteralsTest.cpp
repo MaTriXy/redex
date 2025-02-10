@@ -1,15 +1,27 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <gtest/gtest.h>
 
 #include "DexInstruction.h"
+
+constexpr int64_t max_int(size_t bits) {
+  return bits == 64
+             ? std::numeric_limits<int64_t>::max()
+             : ((bits == 1u)
+                    ? 0
+                    : (int64_t)((UINT64_C(1) << (bits - 1)) - UINT64_C(1)));
+}
+
+constexpr int64_t min_int(size_t bits) {
+  return bits == 64
+             ? std::numeric_limits<int64_t>::min()
+             : ((bits == 1u) ? UINT64_C(-1) : UINT64_C(-1) - max_int(bits));
+}
 
 // Tests getting and setting literal value of a single opcode
 // width is the number of value bits of the stored literal,
@@ -21,10 +33,11 @@ static void test_1_opcode(const char* name,
                           int lshift) {
   DexInstruction insn(opcode);
   const int src_count = insn.srcs_size();
-  int64_t min = -(1 << (width - 1));
-  int64_t max = -min - 1;
+  int64_t min = min_int(width);
+  int64_t max = max_int(width);
   auto perform_1_test = [&](int64_t value) {
-    int64_t ext_value = value << lshift;
+    // Integer shift into the msb is undefined behavior. Shift via unsigned int.
+    int64_t ext_value = ((uint64_t)value) << lshift;
     insn.set_literal(ext_value);
     // set the src and dst registers to verify they don't stomp the literal
     for (int i = 0; i < src_count; i++) {
@@ -37,8 +50,11 @@ static void test_1_opcode(const char* name,
   // perform no more than 256 tests
   // note: naive 1LL<<width may overflow
   int64_t stride = width <= 8 ? 1LL : (1LL << (width - 8));
-  for (int64_t value = min; value < max; value += stride) {
+  for (int64_t value = min;; value += stride) {
     perform_1_test(value);
+    if (value > 0 && max - value < stride) {
+      break; // Overflow.
+    }
   }
   // Always check the min, max, and 0 values
   perform_1_test(min);

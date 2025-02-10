@@ -1,17 +1,13 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include <boost/functional/hash.hpp>
-
-#include "FiniteAbstractDomain.h"
+#include <sparta/FiniteAbstractDomain.h>
 
 /*
  * This module deals with the signedness of integer types, representing them
@@ -24,6 +20,7 @@ enum class Interval {
   LTZ, // (-∞, 0)
   GTZ, // (0, ∞)
   EQZ, // {0}
+  NEZ, // Anything but 0
   GEZ, // [0, ∞)
   LEZ, // (-∞, 0]
   ALL, // (-∞, +∞) -- Top type
@@ -31,23 +28,26 @@ enum class Interval {
   SIZE // The number of items in Interval
 };
 
-using Lattice = BitVectorLattice<Interval,
-                                 static_cast<size_t>(Interval::SIZE),
-                                 boost::hash<Interval>>;
+using Lattice =
+    sparta::BitVectorLattice<Interval, static_cast<size_t>(Interval::SIZE)>;
 
 extern Lattice lattice;
 
 // join and meet are the equivalent of interval union and intersection
 // respectively.
-using Domain =
+using Domain = sparta::
     FiniteAbstractDomain<Interval, Lattice, Lattice::Encoding, &lattice>;
 
 std::ostream& operator<<(std::ostream&, Interval);
 
-std::ostream& operator<<(std::ostream&, Domain);
+std::ostream& operator<<(std::ostream&, const Domain&);
 
 Domain from_int(int64_t);
 
 bool contains(Interval, int64_t);
+
+int64_t max_int(Interval interval);
+
+int64_t min_int(Interval interval);
 
 } // namespace sign_domain

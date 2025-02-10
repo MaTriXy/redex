@@ -1,26 +1,45 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
+#include "ConcurrentContainers.h"
 #include "DexClass.h"
 #include "ProguardConfiguration.h"
 #include "ProguardMap.h"
 
-namespace redex {
+namespace keep_rules {
 
 using Scope = std::vector<DexClass*>;
 
-void process_proguard_rules(const ProguardMap& pg_map,
-                            const Scope& classes,
-                            const Scope& external_classes,
-                            ProguardConfiguration* pg_config);
-}
+struct ProguardRuleRecorder {
+ public:
+  void record_accessed_rules(const std::string& used_rule_path,
+                             const std::string& unused_rule_path);
+  ConcurrentSet<const KeepSpec*> unused_keep_rules;
+  ConcurrentSet<const KeepSpec*> used_keep_rules;
+  ConcurrentSet<const KeepSpec*> unused_assumenosideeffect_rules;
+  ConcurrentSet<const KeepSpec*> used_assumenosideeffect_rules;
+  ConcurrentSet<const KeepSpec*> unused_assumevalues_rules;
+  ConcurrentSet<const KeepSpec*> used_assumevalues_rules;
+};
 
-// namespace redex
+ProguardRuleRecorder process_proguard_rules(
+    const ProguardMap& pg_map,
+    const Scope& classes,
+    const Scope& external_classes,
+    const ProguardConfiguration& pg_config,
+    bool keep_all_annotation_classes);
+
+// Exposed for testing purposes.
+namespace testing {
+
+bool matches(const KeepSpec& ks, const DexClass* c);
+
+} // namespace testing
+
+} // namespace keep_rules

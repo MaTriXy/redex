@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "memory-accounter.h"
@@ -48,7 +46,7 @@ class MemoryAccounterImpl : public MemoryAccounter {
   UNCOPYABLE(MemoryAccounterImpl);
   MOVABLE(MemoryAccounterImpl);
 
-  MemoryAccounterImpl(ConstBuffer buf) : buf_(buf) {
+  explicit MemoryAccounterImpl(ConstBuffer buf) : buf_(buf) {
     // mark end to avoid special case in print.
     consumed_ranges_.emplace_back(buf_.len, buf_.len);
   }
@@ -61,7 +59,7 @@ class MemoryAccounterImpl : public MemoryAccounter {
 
     Range prev{0, 0};
     printf("Memory accounting:\n");
-    if (consumed_ranges_.size() == 0) {
+    if (consumed_ranges_.empty()) {
       printf("  no unconsumed memory found\n");
     }
 
@@ -109,7 +107,7 @@ class MemoryAccounterImpl : public MemoryAccounter {
   }
 
   static MemoryAccounter* Cur() {
-    if (accounter_stack_.size() == 0) {
+    if (accounter_stack_.empty()) {
       return &nil_accounter_;
     }
     return accounter_stack_.back().get();
@@ -141,7 +139,9 @@ class MultiBufferMemoryAccounter : public MemoryAccounter {
   MOVABLE(MultiBufferMemoryAccounter);
   UNCOPYABLE(MultiBufferMemoryAccounter);
 
-  MultiBufferMemoryAccounter(ConstBuffer buf) { accounters_.emplace_back(buf); }
+  explicit MultiBufferMemoryAccounter(ConstBuffer buf) {
+    accounters_.emplace_back(buf);
+  }
 
   void print() override;
 
@@ -151,7 +151,7 @@ class MultiBufferMemoryAccounter : public MemoryAccounter {
   void markBufferConsumed(ConstBuffer subBuffer) override;
   void addBuffer(ConstBuffer buf) override;
 
-  virtual ~MultiBufferMemoryAccounter() = default;
+  ~MultiBufferMemoryAccounter() override = default;
 
  private:
   std::vector<MemoryAccounterImpl> accounters_;
@@ -237,6 +237,6 @@ MemoryAccounterScope::MemoryAccounterScope(ConstBuffer buf) {
 }
 
 MemoryAccounterScope::~MemoryAccounterScope() {
-  CHECK(MemoryAccounterImpl::accounter_stack_.size() > 0);
+  CHECK(!MemoryAccounterImpl::accounter_stack_.empty());
   MemoryAccounterImpl::accounter_stack_.pop_back();
 }

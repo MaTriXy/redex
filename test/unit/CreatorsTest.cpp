@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <gtest/gtest.h>
@@ -12,28 +10,27 @@
 #include "Creators.h"
 #include "DexAsm.h"
 #include "DexClass.h"
+#include "DexInstruction.h"
+#include "RedexTest.h"
+#include "Show.h"
 
 using namespace dex_asm;
-
-std::ostream& operator<<(std::ostream& os, const IRInstruction& to_show) {
-  return os << show(&to_show);
-}
 
 MethodCreator make_method_creator() {
 
   MethodCreator mc(DexType::make_type("Lfoo;"),
                    DexString::make_string("bar"),
-                   DexProto::make_proto(get_void_type(),
+                   DexProto::make_proto(type::_void(),
 
                                         DexTypeList::make_type_list(
-                                            {get_int_type(), get_long_type()})),
+                                            {type::_int(), type::_long()})),
                    ACC_PUBLIC);
   return mc;
 }
 
-TEST(CreatorsTest, Alloc) {
-  g_redex = new RedexContext();
+class CreatorsTest : public RedexTest {};
 
+TEST_F(CreatorsTest, Alloc) {
   auto mc = make_method_creator();
   auto loc = mc.make_local(DexType::make_type("I"));
   mc.get_main_block()->load_const(loc, 123);
@@ -47,14 +44,11 @@ TEST(CreatorsTest, Alloc) {
   EXPECT_EQ(*it->insn, *dasm(IOPCODE_LOAD_PARAM_WIDE, {3_v}));
   ++it;
   EXPECT_EQ(*it->insn, *dasm(OPCODE_CONST, {0_v, 123_L}));
-
-  delete g_redex;
 }
 
-TEST(MakeSwitch, MultiIndices) {
-  g_redex = new RedexContext();
+TEST_F(CreatorsTest, MakeSwitchMultiIndices) {
   auto mc = make_method_creator();
-  auto idx_loc = mc.make_local(get_int_type());
+  auto idx_loc = mc.make_local(type::_int());
   auto param_loc = mc.get_local(1);
   auto mb = mc.get_main_block();
   mb->load_const(idx_loc, 1);
@@ -71,12 +65,12 @@ TEST(MakeSwitch, MultiIndices) {
   auto def_block = mb->switch_op(idx_loc, cases);
   def_block->init_loc(param_loc);
 
-  for (auto it : cases) {
+  for (const auto& it : cases) {
     auto idx = it.first;
     auto case_block = cases[idx];
     ASSERT_TRUE(idx.size());
-    case_block->binop_lit16(
-        OPCODE_ADD_INT_LIT16, param_loc, param_loc, *idx.begin());
+    case_block->binop_lit(
+        OPCODE_ADD_INT_LIT, param_loc, param_loc, *idx.begin());
   }
 
   auto method = mc.create();
@@ -87,17 +81,17 @@ TEST(MakeSwitch, MultiIndices) {
   EXPECT_EQ(*it++->insn, *dasm(IOPCODE_LOAD_PARAM, {2_v}));
   EXPECT_EQ(*it++->insn, *dasm(IOPCODE_LOAD_PARAM_WIDE, {3_v}));
   EXPECT_EQ(*it++->insn, *dasm(OPCODE_CONST, {0_v, 1_L}));
-  EXPECT_EQ(*it++->insn, *dasm(OPCODE_PACKED_SWITCH, {0_v}));
+  EXPECT_EQ(*it++->insn, *dasm(OPCODE_SWITCH, {0_v}));
 
   EXPECT_EQ(*it++->insn, *dasm(OPCODE_CONST, {2_v, 0_L}));
 
-  EXPECT_EQ(*it++->insn, *dasm(OPCODE_ADD_INT_LIT16, {2_v, 2_v, 0_L}));
+  EXPECT_EQ(*it++->insn, *dasm(OPCODE_ADD_INT_LIT, {2_v, 2_v, 0_L}));
   EXPECT_EQ(*it++->insn, *dasm(OPCODE_GOTO, {}));
 
-  EXPECT_EQ(*it++->insn, *dasm(OPCODE_ADD_INT_LIT16, {2_v, 2_v, 2_L}));
+  EXPECT_EQ(*it++->insn, *dasm(OPCODE_ADD_INT_LIT, {2_v, 2_v, 2_L}));
   EXPECT_EQ(*it++->insn, *dasm(OPCODE_GOTO, {}));
 
-  EXPECT_EQ(*it++->insn, *dasm(OPCODE_ADD_INT_LIT16, {2_v, 2_v, 3_L}));
+  EXPECT_EQ(*it++->insn, *dasm(OPCODE_ADD_INT_LIT, {2_v, 2_v, 3_L}));
   EXPECT_EQ(*it++->insn, *dasm(OPCODE_GOTO, {}));
 
   method->sync();
@@ -112,7 +106,7 @@ TEST(MakeSwitch, MultiIndices) {
 
     DexOpcodeData* dex_data = static_cast<DexOpcodeData*>(insn);
     const uint16_t* data = dex_data->data();
-    printf(" data size: %d\n", dex_data->size());
+    printf(" data size: %zu\n", dex_data->size());
     EXPECT_EQ(dex_data->size(), 12); // (4 cases * 2) + 4
     EXPECT_EQ(*data, 4); // 4 cases
     uint32_t* data32 = (uint32_t*)&data[1];
@@ -122,6 +116,20 @@ TEST(MakeSwitch, MultiIndices) {
     EXPECT_EQ(*data32++, 8); // case 2
     EXPECT_EQ(*data32++, 11); // case 3
   }
+}
 
-  delete g_redex;
+TEST_F(CreatorsTest, ClassCreator) {
+  std::string foo("Lfoo;");
+  ClassCreator cc(DexType::make_type(foo));
+  cc.set_super(type::java_lang_Object());
+  auto cls = cc.create();
+  std::string bar("Lbar;");
+  cls->set_deobfuscated_name(bar);
+
+  auto foo_type = DexType::get_type(foo);
+  auto bar_type = DexType::get_type(bar);
+  EXPECT_EQ(foo_type, cls->get_type());
+  if (kInsertDeobfuscatedNameLinks) {
+    EXPECT_EQ(bar_type, cls->get_type());
+  }
 }

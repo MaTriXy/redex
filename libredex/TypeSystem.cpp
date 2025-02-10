@@ -1,25 +1,25 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "TypeSystem.h"
 
 #include "DexUtil.h"
-#include "Timer.h"
+#include "RedexContext.h"
 #include "Resolver.h"
+#include "Show.h"
+#include "Timer.h"
+#include "Trace.h"
 
 namespace {
 
-void make_instanceof_table(
-    InstanceOfTable& instance_of_table,
-    const ClassHierarchy& hierarchy,
-    const DexType* type,
-    size_t depth = 1) {
+void make_instanceof_table(InstanceOfTable& instance_of_table,
+                           const ClassHierarchy& hierarchy,
+                           const DexType* type,
+                           size_t depth = 1) {
   auto& parent_chain = instance_of_table[type];
   const auto cls = type_class(type);
   if (cls != nullptr) {
@@ -43,7 +43,7 @@ void make_instanceof_table(
 }
 
 void load_interface_children(ClassHierarchy& children, const DexClass* intf) {
-  for (const auto& super_intf : intf->get_interfaces()->get_type_list()) {
+  for (const auto& super_intf : *intf->get_interfaces()) {
     children[super_intf].insert(intf->get_type());
     const auto super_intf_cls = type_class(super_intf);
     if (super_intf_cls != nullptr) {
@@ -53,11 +53,10 @@ void load_interface_children(ClassHierarchy& children, const DexClass* intf) {
 }
 
 void load_interface_children(ClassHierarchy& children) {
-  g_redex->walk_type_class(
-      [&](const DexType* type, const DexClass* cls) {
-        if (!cls->is_external() || !is_interface(cls)) return;
-        load_interface_children(children, cls);
-      });
+  g_redex->walk_type_class([&](const DexType* type, const DexClass* cls) {
+    if (!cls->is_external() || !is_interface(cls)) return;
+    load_interface_children(children, cls);
+  });
 }
 
 void load_interface_children(const Scope& scope, ClassHierarchy& children) {
@@ -68,7 +67,7 @@ void load_interface_children(const Scope& scope, ClassHierarchy& children) {
   load_interface_children(children);
 }
 
-}
+} // namespace
 
 const TypeSet TypeSystem::empty_set = TypeSet();
 const TypeVector TypeSystem::empty_vec = TypeVector();
@@ -78,14 +77,20 @@ TypeSystem::TypeSystem(const Scope& scope) : m_class_scopes(scope) {
   make_instanceof_interfaces_table();
 }
 
-void TypeSystem::get_all_super_interfaces(
-    const DexType* intf, TypeSet& supers) const {
+void TypeSystem::get_all_super_interfaces(const DexType* intf,
+                                          TypeSet& supers) const {
   const auto cls = type_class(intf);
   if (cls == nullptr) return;
-  for (const auto& super : cls->get_interfaces()->get_type_list()) {
+  for (const auto& super : *cls->get_interfaces()) {
     supers.insert(super);
     get_all_super_interfaces(super, supers);
   }
+}
+
+TypeSet TypeSystem::get_all_super_interfaces(const DexType* intf) const {
+  TypeSet supers;
+  get_all_super_interfaces(intf, supers);
+  return supers;
 }
 
 TypeSet TypeSystem::get_local_interfaces(const TypeSet& classes) {
@@ -119,16 +124,16 @@ const VirtualScope* TypeSystem::find_virtual_scope(
 
   const auto match = [](const DexMethod* meth1, const DexMethod* meth2) {
     return meth1->get_name() == meth2->get_name() &&
-        meth1->get_proto() == meth2->get_proto();
+           meth1->get_proto() == meth2->get_proto();
   };
 
   auto type = meth->get_class();
   while (type != nullptr) {
-    TRACE(VIRT, 5, "check... %s\n", SHOW(type));
+    TRACE(VIRT, 5, "check... %s", SHOW(type));
     for (const auto& scope : m_class_scopes.get(type)) {
-      TRACE(VIRT, 5, "check... %s\n", SHOW(scope->methods[0].first));
+      TRACE(VIRT, 5, "check... %s", SHOW(scope->methods[0].first));
       if (match(scope->methods[0].first, meth)) {
-        TRACE(VIRT, 5, "return scope\n");
+        TRACE(VIRT, 5, "return scope");
         return scope;
       }
     }
@@ -156,9 +161,7 @@ std::vector<const DexMethod*> TypeSystem::select_from(
   }
   if (!found_root_method) {
     const auto& parents = parent_chain(type);
-    for (auto parent = parents.rbegin();
-        parent != parents.rend();
-        ++parent) {
+    for (auto parent = parents.rbegin(); parent != parents.rend(); ++parent) {
       const auto& meth = non_child_methods.find(*parent);
       if (meth == non_child_methods.end()) continue;
       refined_scope.emplace_back(meth->second);
@@ -177,7 +180,7 @@ void TypeSystem::make_instanceof_interfaces_table() {
     if (parent_cls != nullptr) continue;
     no_parents.emplace_back(parent);
   }
-  no_parents.emplace_back(get_object_type());
+  no_parents.emplace_back(type::java_lang_Object());
   for (const auto& root : no_parents) {
     make_instanceof_table(m_instanceof_table, hierarchy, root);
   }
@@ -193,11 +196,11 @@ void TypeSystem::make_interfaces_table(const DexType* type) {
     if (super != nullptr) {
       const auto& parent_intfs = m_interfaces.find(super);
       if (parent_intfs != m_interfaces.end()) {
-        m_interfaces[type].insert(
-            parent_intfs->second.begin(), parent_intfs->second.end());
+        m_interfaces[type].insert(parent_intfs->second.begin(),
+                                  parent_intfs->second.end());
       }
     }
-    for (const auto& intf : cls->get_interfaces()->get_type_list()) {
+    for (const auto& intf : *cls->get_interfaces()) {
       m_interfaces[type].insert(intf);
       get_all_super_interfaces(intf, m_interfaces[type]);
     }
@@ -211,15 +214,14 @@ void TypeSystem::make_interfaces_table(const DexType* type) {
   }
 }
 
-void TypeSystem::select_methods(
-    const VirtualScope& scope,
-    const std::unordered_set<DexType*>& types,
-    std::unordered_set<DexMethod*>& methods) const {
-  TRACE(VIRT, 1, "select_methods make filter\n");
+void TypeSystem::select_methods(const VirtualScope& scope,
+                                const std::unordered_set<DexType*>& types,
+                                std::unordered_set<DexMethod*>& methods) const {
+  TRACE(VIRT, 1, "select_methods make filter");
   std::unordered_set<DexType*> filter;
   filter.insert(types.begin(), types.end());
 
-  TRACE(VIRT, 1, "select_methods make type_method map\n");
+  TRACE(VIRT, 1, "select_methods make type_method map");
   std::unordered_map<const DexType*, DexMethod*> type_method;
   for (const auto& vmeth : scope.methods) {
     const auto meth = vmeth.first;
@@ -227,11 +229,11 @@ void TypeSystem::select_methods(
     type_method[meth->get_class()] = meth;
   }
 
-  TRACE(VIRT, 1, "select_methods walk hierarchy\n");
+  TRACE(VIRT, 1, "select_methods walk hierarchy");
   while (!filter.empty()) {
     const auto type = *filter.begin();
     filter.erase(filter.begin());
-    TRACE(VIRT, 1, "check... %s\n", SHOW(type));
+    TRACE(VIRT, 1, "check... %s", SHOW(type));
     if (!is_subtype(scope.type, type)) continue;
     const auto& meth = type_method.find(type);
     if (meth != type_method.end()) {
@@ -245,10 +247,9 @@ void TypeSystem::select_methods(
   }
 }
 
-void TypeSystem::select_methods(
-    const InterfaceScope& scope,
-    const std::unordered_set<DexType*>& types,
-    std::unordered_set<DexMethod*>& methods) const {
+void TypeSystem::select_methods(const InterfaceScope& scope,
+                                const std::unordered_set<DexType*>& types,
+                                std::unordered_set<DexMethod*>& methods) const {
   for (const auto& virt_scope : scope) {
     select_methods(*virt_scope, types, methods);
   }

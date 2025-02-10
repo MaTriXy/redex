@@ -1,15 +1,13 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
+#include "OatmealUtil.h"
 #include "dump-oat.h"
 #include "memory-accounter.h"
-#include "OatmealUtil.h"
 #include "vdex.h"
 
 #include <getopt.h>
@@ -211,7 +209,7 @@ Arguments parse_args(int argc, char* argv[]) {
     exit(1);
   }
 
-  if (dex_locations.size() > 0) {
+  if (!dex_locations.empty()) {
     if (dex_locations.size() != dex_files.size()) {
       fprintf(
           stderr,
@@ -268,7 +266,8 @@ int dump(const Arguments& args) {
   auto ma_scope = MemoryAccounter::NewScope(oatfile_buffer);
 
   CHECK(oatfile_buffer.len > 4);
-  if (*(reinterpret_cast<const uint32_t*>(oatfile_buffer.ptr)) == kVdexMagicNum) {
+  if (*(reinterpret_cast<const uint32_t*>(oatfile_buffer.ptr)) ==
+      kVdexMagicNum) {
     auto vdexfile = VdexFile::parse(oatfile_buffer);
     vdexfile->print();
     return 0;

@@ -1,18 +1,18 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc. * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
+
+#include <sparta/HashedAbstractPartition.h>
 
 #include "CallGraph.h"
 #include "ConstantEnvironment.h"
 #include "ConstantPropagationAnalysis.h"
 #include "ConstantPropagationWholeProgramState.h"
-#include "HashedAbstractPartition.h"
 
 namespace constant_propagation {
 
@@ -28,10 +28,9 @@ namespace interprocedural {
  * distinct types: Here, the environment variables denote param index, whereas
  * in a ConstantRegisterEnvironment, they denote registers.
  */
-using param_index_t = uint16_t;
 
 using ArgumentDomain =
-    PatriciaTreeMapAbstractEnvironment<param_index_t, ConstantValue>;
+    sparta::PatriciaTreeMapAbstractEnvironment<param_index_t, ConstantValue>;
 
 /*
  * This map is an abstraction of the execution paths starting from the entry
@@ -44,18 +43,31 @@ using ArgumentDomain =
  * contained in the method to the ArgumentDomains representing the arguments
  * passed to the callee.
  */
-using Domain = HashedAbstractPartition<const IRInstruction*, ArgumentDomain>;
+using Domain =
+    sparta::HashedAbstractPartition<const IRInstruction*, ArgumentDomain>;
 
 constexpr IRInstruction* CURRENT_PARTITION_LABEL = nullptr;
 
 /*
  * Return an environment populated with parameter values.
  */
-ConstantEnvironment env_with_params(const IRCode* code,
+ConstantEnvironment env_with_params(bool is_static,
+                                    const IRCode* code,
                                     const ArgumentDomain& args);
 
-using ProcedureAnalysisFactory =
-    std::function<std::unique_ptr<intraprocedural::FixpointIterator>(
+struct IntraproceduralAnalysis {
+  std::unique_ptr<WholeProgramStateAccessor> wps_accessor;
+  intraprocedural::FixpointIterator fp_iter;
+  IntraproceduralAnalysis(
+      const State* cp_state,
+      std::unique_ptr<WholeProgramStateAccessor> wps_accessor,
+      const cfg::ControlFlowGraph& cfg,
+      InstructionAnalyzer<ConstantEnvironment> insn_analyzer,
+      const ConstantEnvironment& env);
+};
+
+using IntraproceduralAnalysisFactory =
+    std::function<std::unique_ptr<IntraproceduralAnalysis>(
         const DexMethod*, const WholeProgramState&, ArgumentDomain)>;
 
 /*
@@ -64,23 +76,36 @@ using ProcedureAnalysisFactory =
  * The intraprocedural propagation logic is delegated to the
  * ProcedureAnalysisFactory.
  */
-class FixpointIterator
-    : public MonotonicFixpointIterator<call_graph::GraphInterface, Domain> {
+class FixpointIterator : public sparta::ParallelMonotonicFixpointIterator<
+                             call_graph::GraphInterface,
+                             Domain> {
  public:
-  FixpointIterator(const call_graph::Graph& call_graph,
-                   const ProcedureAnalysisFactory& proc_analysis_factory)
-      : MonotonicFixpointIterator(call_graph),
-        m_wps(new WholeProgramState()),
-        m_proc_analysis_factory(proc_analysis_factory) {}
+  struct Stats {
+    size_t method_cache_hits{0};
+    size_t method_cache_misses{0};
+  };
+  FixpointIterator(
+      std::shared_ptr<const call_graph::Graph> call_graph,
+      const IntraproceduralAnalysisFactory& proc_analysis_factory,
+      std::shared_ptr<const call_graph::Graph> call_graph_for_wps = nullptr)
+      : ParallelMonotonicFixpointIterator(*call_graph),
+        m_proc_analysis_factory(proc_analysis_factory),
+        m_call_graph(std::move(call_graph)) {
+    auto wps = new WholeProgramState(std::move(call_graph_for_wps));
+    wps->set_to_top();
+    m_wps.reset(wps);
+  }
 
-  void analyze_node(DexMethod* const& method,
+  virtual ~FixpointIterator();
+
+  void analyze_node(const call_graph::NodeId& node,
                     Domain* current_state) const override;
 
-  Domain analyze_edge(const std::shared_ptr<call_graph::Edge>& edge,
+  Domain analyze_edge(const call_graph::EdgeId& edge,
                       const Domain& exit_state_at_source) const override;
 
-  std::unique_ptr<intraprocedural::FixpointIterator>
-  get_intraprocedural_analysis(const DexMethod*) const;
+  std::unique_ptr<IntraproceduralAnalysis> get_intraprocedural_analysis(
+      const DexMethod*) const;
 
   const WholeProgramState& get_whole_program_state() const { return *m_wps; }
 
@@ -88,9 +113,34 @@ class FixpointIterator
     m_wps = std::move(wps);
   }
 
+  const call_graph::Graph& get_call_graph() { return *m_call_graph; }
+
+  const Stats& get_stats() const { return m_stats; }
+
  private:
+  const ArgumentDomain& get_entry_args(const DexMethod* method) const;
+
   std::unique_ptr<const WholeProgramState> m_wps;
-  ProcedureAnalysisFactory m_proc_analysis_factory;
+  IntraproceduralAnalysisFactory m_proc_analysis_factory;
+  std::shared_ptr<const call_graph::Graph> m_call_graph;
+  struct MethodCacheEntry {
+    ArgumentDomain args;
+    WholeProgramStateAccessorRecord wps_accessor_record;
+    std::unordered_map<const IRInstruction*, ArgumentDomain> result;
+  };
+  using MethodCache = std::list<std::shared_ptr<const MethodCacheEntry>>;
+  mutable ConcurrentMap<const DexMethod*, MethodCache> m_cache;
+
+  MethodCache& get_method_cache(const DexMethod* method) const;
+
+  bool method_cache_entry_matches(const MethodCacheEntry& mce,
+                                  const ArgumentDomain& args) const;
+
+  const MethodCacheEntry* find_matching_method_cache_entry(
+      MethodCache& method_cache, const ArgumentDomain& args) const;
+
+  mutable Stats m_stats;
+  mutable std::mutex m_stats_mutex;
 };
 
 } // namespace interprocedural
@@ -99,5 +149,13 @@ class FixpointIterator
  * For each static field in :cls, bind its encoded value in :env.
  */
 void set_encoded_values(const DexClass* cls, ConstantEnvironment* env);
+
+/**
+ * Bind all eligible fields to SignedConstantDomain(0) in :env, since all
+ * fields are initialized to zero by default at runtime.
+ */
+void set_ifield_values(const DexClass* cls,
+                       const EligibleIfields& eligible_ifields,
+                       ConstantEnvironment* env);
 
 } // namespace constant_propagation

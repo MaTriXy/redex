@@ -1,16 +1,22 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include "IRCode.h"
-#include "S_Expression.h"
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <sparta/S_Expression.h>
+
+class DexClass;
+class DexField;
+class DexMethod;
+class IRCode;
 
 /*
  * This module provides an easy way to create / serialize Dex elements using
@@ -35,10 +41,6 @@
  * automatically created by the assembler. I.e. you do *not* need to call
  * make_{field,method}() beforehand to ensure that they exist.
  *
- * Not-yet-implemented features:
- *   - try-catch
- *   - fill-array-data opcodes
- *
  * NOTE:
  * When assembling an IRCode instance, the assembler will attempt to set the
  * registers_size for you by making it 1 larger than the largest register
@@ -54,18 +56,32 @@
 
 namespace assembler {
 
-s_expr to_s_expr(const IRCode* code);
+sparta::s_expr to_s_expr(const IRCode* code);
 
 inline std::string to_string(const IRCode* code) {
   return to_s_expr(code).str();
 }
 
-std::unique_ptr<IRCode> ircode_from_s_expr(const s_expr&);
+std::unique_ptr<IRCode> ircode_from_s_expr(const sparta::s_expr&);
 
 std::unique_ptr<IRCode> ircode_from_string(const std::string&);
 
-DexMethod* method_from_s_expr(const s_expr&);
+DexMethod* method_from_s_expr(const sparta::s_expr&);
 
 DexMethod* method_from_string(const std::string&);
+
+DexField* field_from_s_expr(const sparta::s_expr& field_def);
+
+DexField* field_from_string(const std::string& field_def);
+
+DexClass* class_from_s_expr(const sparta::s_expr& class_expr);
+
+DexClass* class_from_string(const std::string& class_def);
+
+DexMethod* class_with_method(const std::string& class_name,
+                             const std::string& method_instructions);
+
+DexClass* class_with_methods(const std::string& class_name,
+                             const std::vector<DexMethod*>& methods);
 
 } // namespace assembler

@@ -1,23 +1,47 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
 #include <boost/intrusive/list.hpp>
+#include <boost/optional.hpp>
 #include <boost/range/sub_range.hpp>
+#include <functional>
+#include <iosfwd>
+#include <limits>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
-#include "DexClass.h"
-#include "DexDebugInstruction.h"
-#include "IRInstruction.h"
+#include "Debug.h"
 
+class DexCallSite;
+class DexDebugInstruction;
+class DexFieldRef;
+class DexInstruction;
+class DexMethodHandle;
+class DexMethodRef;
+struct DexPosition;
+class DexString;
+class DexType;
+class IRCode;
+class IRInstruction;
 struct MethodItemEntry;
+
+using reg_t = uint32_t;
+
+namespace opcode {
+enum Branchingness : uint8_t;
+} // namespace opcode
 
 enum TryEntryType {
   TRY_START = 0,
@@ -33,12 +57,17 @@ struct TryEntry {
       : type(type), catch_start(catch_start) {
     always_assert(catch_start != nullptr);
   }
+
+  bool operator==(const TryEntry& other) const;
 };
 
 struct CatchEntry {
   DexType* catch_type;
   MethodItemEntry* next; // always null for catchall
-  CatchEntry(DexType* catch_type) : catch_type(catch_type), next(nullptr) {}
+  explicit CatchEntry(DexType* catch_type)
+      : catch_type(catch_type), next(nullptr) {}
+
+  bool operator==(const CatchEntry& other) const;
 };
 
 /**
@@ -47,6 +76,9 @@ struct CatchEntry {
  * of values matching a switch case.
  */
 using SwitchIndices = std::set<int>;
+
+using InstructionEquality =
+    std::function<bool(const IRInstruction&, const IRInstruction&)>;
 
 /*
  * Multi is where an opcode encodes more than
@@ -63,18 +95,183 @@ enum BranchTargetType {
 };
 
 struct BranchTarget {
-  BranchTargetType type;
   MethodItemEntry* src;
+  BranchTargetType type;
 
   // The key that a value must match to take this case in a switch statement.
   int32_t case_key;
 
   BranchTarget() = default;
-  BranchTarget(MethodItemEntry* src) : type(BRANCH_SIMPLE), src(src) {}
+  explicit BranchTarget(MethodItemEntry* src) : src(src), type(BRANCH_SIMPLE) {}
 
   BranchTarget(MethodItemEntry* src, int32_t case_key)
-      : type(BRANCH_MULTI), src(src), case_key(case_key) {}
+      : src(src), type(BRANCH_MULTI), case_key(case_key) {}
+
+  bool operator==(const BranchTarget& other) const;
 };
+
+/**
+ * A SourceBlock refers to a method and block ID that the following code came
+ * from. It also has a float payload at the moment (though that is in flow),
+ * which will be used for profiling information.
+ */
+struct SourceBlock {
+  const DexString* src{nullptr};
+  std::unique_ptr<SourceBlock> next;
+  // Large methods exist, but a 32-bit integer is safe.
+  // Use the maximum for things that we do not want to emit at this point.
+  static constexpr uint32_t kSyntheticId = std::numeric_limits<uint32_t>::max();
+  uint32_t id{0};
+  // Float has enough precision.
+  class Val {
+    static constexpr float kNoneVal = std::numeric_limits<float>::quiet_NaN();
+
+   public:
+    Val() {}
+    constexpr Val(float v, float a) noexcept : m_val({v, a}) {}
+
+    static constexpr Val none() { return Val(kNoneVal, kNoneVal); }
+
+    // NOLINTNEXTLINE
+    /* implicit */ operator bool() const { return m_val.val == m_val.val; };
+
+    bool operator==(const Val& other) const {
+      return (m_val.val == other.m_val.val &&
+              m_val.appear100 == other.m_val.appear100) ||
+             (m_val.val != m_val.val && other.m_val.val != other.m_val.val);
+    }
+
+    // To access like an `optional`.
+
+    struct ValPair {
+      float val;
+      float appear100;
+    };
+
+    ValPair& operator*() {
+      redex_assert(operator bool());
+      return m_val;
+    }
+    const ValPair& operator*() const {
+      redex_assert(operator bool());
+      return m_val;
+    }
+
+    ValPair* operator->() {
+      redex_assert(operator bool());
+      return &m_val;
+    }
+    const ValPair* operator->() const {
+      redex_assert(operator bool());
+      return &m_val;
+    }
+
+   private:
+    ValPair m_val;
+  };
+  const uint32_t vals_size{0};
+  const std::unique_ptr<Val[]> vals;
+
+  SourceBlock() = default;
+  SourceBlock(const DexString* src, size_t id) : src(src), id(id) {}
+  SourceBlock(const DexString* src, size_t id, const std::vector<Val>& v)
+      : src(src),
+        id(id),
+        vals_size(v.size()),
+        vals(clone_vals(v.data(), v.size())) {}
+  SourceBlock(const SourceBlock& other)
+      : src(other.src),
+        next(other.next == nullptr ? nullptr : new SourceBlock(*other.next)),
+        id(other.id),
+        vals_size(other.vals_size),
+        vals(clone_vals(other.vals.get(), other.vals_size)) {}
+
+  boost::optional<float> get_val(size_t i) const {
+    return vals[i] ? boost::optional<float>(vals[i]->val) : boost::none;
+  }
+  boost::optional<float> get_appear100(size_t i) const {
+    return vals[i] ? boost::optional<float>(vals[i]->appear100) : boost::none;
+  }
+
+  static std::unique_ptr<Val[]> clone_vals(const Val* vals, size_t vals_size) {
+    auto res = std::make_unique<Val[]>(vals_size);
+    for (size_t i = 0; i < vals_size; i++) {
+      res[i] = vals[i];
+    }
+    return res;
+  }
+
+  template <typename Fn>
+  void foreach_val(const Fn& fn) const {
+    for (size_t i = 0; i < vals_size; i++) {
+      auto& val = vals[i];
+      fn(val);
+    }
+  }
+
+  template <typename Fn>
+  bool foreach_val_early(const Fn& fn) const {
+    for (size_t i = 0; i < vals_size; i++) {
+      auto& val = vals[i];
+      if (fn(val)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool operator==(const SourceBlock& other) const {
+    if (src != other.src || id != other.id || vals_size != other.vals_size) {
+      return false;
+    }
+    for (size_t i = 0; i < vals_size; i++) {
+      if (vals[i] != other.vals[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void append(std::unique_ptr<SourceBlock> sb) {
+    SourceBlock* last = this;
+    while (last->next != nullptr) {
+      last = last->next.get();
+    }
+    last->next = std::move(sb);
+  }
+
+  SourceBlock* get_last_in_chain() {
+    auto* last = this;
+    while (last->next != nullptr) {
+      last = last->next.get();
+    }
+    return last;
+  }
+  const SourceBlock* get_last_in_chain() const {
+    auto* last = this;
+    while (last->next != nullptr) {
+      last = last->next.get();
+    }
+    return last;
+  }
+
+  std::string show(bool quoted_src = false) const;
+
+  void max(const SourceBlock& other) {
+    size_t len = std::min(vals_size, other.vals_size);
+    for (size_t i = 0; i != len; ++i) {
+      if (!vals[i]) {
+        vals[i] = other.vals[i];
+      } else if (other.vals[i]) {
+        vals[i]->val = std::max(vals[i]->val, other.vals[i]->val);
+        vals[i]->appear100 =
+            std::max(vals[i]->appear100, other.vals[i]->appear100);
+      }
+    }
+  }
+};
+
+static_assert(sizeof(void*) != 8 || sizeof(SourceBlock) == 32);
 
 /*
  * MethodItemEntry (and the IRLists that it gets linked into) is a data
@@ -101,13 +298,18 @@ enum MethodItemType {
   // The target of a goto, if, or switch. Also known as a "label"
   MFLOW_TARGET,
 
-  // These hold information about the next MFLOW_(DEX_)OPCODE
+  // These hold information about the following `MFLOW_(DEX_)OPCODE`s
   MFLOW_DEBUG,
   MFLOW_POSITION,
+
+  // This holds information about the source block.
+  MFLOW_SOURCE_BLOCK,
 
   // A no-op
   MFLOW_FALLTHROUGH,
 };
+
+std::ostream& operator<<(std::ostream&, const MethodItemType& type);
 
 struct MethodItemEntry {
   boost::intrusive::list_member_hook<> list_hook_;
@@ -123,6 +325,7 @@ struct MethodItemEntry {
     BranchTarget* target;
     std::unique_ptr<DexDebugInstruction> dbgop;
     std::unique_ptr<DexPosition> pos;
+    std::unique_ptr<SourceBlock> src_block;
   };
   MethodItemEntry(const MethodItemEntry&);
   explicit MethodItemEntry(DexInstruction* dex_insn) {
@@ -135,16 +338,21 @@ struct MethodItemEntry {
   }
   MethodItemEntry(TryEntryType try_type, MethodItemEntry* catch_start)
       : type(MFLOW_TRY), tentry(new TryEntry(try_type, catch_start)) {}
-  MethodItemEntry(DexType* catch_type)
+  explicit MethodItemEntry(DexType* catch_type)
       : type(MFLOW_CATCH), centry(new CatchEntry(catch_type)) {}
-  MethodItemEntry(BranchTarget* bt) {
+  explicit MethodItemEntry(BranchTarget* bt) {
     this->type = MFLOW_TARGET;
     this->target = bt;
   }
-  MethodItemEntry(std::unique_ptr<DexDebugInstruction> dbgop)
-      : type(MFLOW_DEBUG), dbgop(std::move(dbgop)) {}
-  MethodItemEntry(std::unique_ptr<DexPosition> pos)
-      : type(MFLOW_POSITION), pos(std::move(pos)) {}
+  explicit MethodItemEntry(std::unique_ptr<DexDebugInstruction> dbgop);
+  explicit MethodItemEntry(std::unique_ptr<DexPosition> pos);
+  explicit MethodItemEntry(std::unique_ptr<SourceBlock> src_block);
+
+  bool operator==(const MethodItemEntry&) const;
+
+  bool operator!=(const MethodItemEntry& that) const {
+    return !(*this == that);
+  }
 
   MethodItemEntry() : type(MFLOW_FALLTHROUGH) {}
   ~MethodItemEntry();
@@ -153,28 +361,47 @@ struct MethodItemEntry {
    * This should only ever be used by the instruction lowering step. Do NOT use
    * it in passes!
    */
-  void replace_ir_with_dex(DexInstruction* dex_insn) {
-    always_assert(type == MFLOW_OPCODE);
-    this->type = MFLOW_DEX_OPCODE;
-    this->dex_insn = dex_insn;
-  }
+  void replace_ir_with_dex(DexInstruction* dex_insn);
 
-  void gather_strings(std::vector<DexString*>& lstring) const;
+  void gather_strings(std::vector<const DexString*>& lstring) const;
   void gather_types(std::vector<DexType*>& ltype) const;
+  void gather_init_classes(std::vector<DexType*>& ltype) const;
   void gather_fields(std::vector<DexFieldRef*>& lfield) const;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const;
+  void gather_callsites(std::vector<DexCallSite*>& lcallsite) const;
+  void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
 
   opcode::Branchingness branchingness() const;
+};
+
+class MethodItemEntryCloner {
+  // We need a map of MethodItemEntry we have created because a branch
+  // points to another MethodItemEntry which may have been created or not
+  std::unordered_map<const MethodItemEntry*, MethodItemEntry*> m_entry_map;
+  // for remapping the parent position pointers
+  std::unordered_map<DexPosition*, DexPosition*> m_pos_map;
+  std::vector<DexPosition*> m_positions_to_fix;
+
+ public:
+  MethodItemEntryCloner();
+  MethodItemEntry* clone(const MethodItemEntry* mie);
+
+  /*
+   * This should to be called after the whole method is already cloned so that
+   * m_pos_map has all the positions in the method.
+   *
+   * Don't change any parent pointers that point to `ignore_pos`. This is used
+   * for inlining because the invoke position is the parent but it isn't in the
+   * callee. If you don't have any positions to ignore, nullptr is a safe
+   * default.
+   */
+  void fix_parent_positions(const DexPosition* ignore_pos = nullptr);
 };
 
 using MethodItemMemberListOption =
     boost::intrusive::member_hook<MethodItemEntry,
                                   boost::intrusive::list_member_hook<>,
                                   &MethodItemEntry::list_hook_>;
-
-struct IRListDisposer {
-  void operator()(MethodItemEntry* mie) { delete mie; }
-};
 
 class IRList {
  private:
@@ -184,22 +411,25 @@ class IRList {
   IntrusiveList m_list;
   void remove_branch_targets(IRInstruction* branch_inst);
 
+  static void disposer(MethodItemEntry* mie) { delete mie; }
+
  public:
   using iterator = IntrusiveList::iterator;
   using const_iterator = IntrusiveList::const_iterator;
   using reverse_iterator = IntrusiveList::reverse_iterator;
+  using const_reverse_iterator = IntrusiveList::const_reverse_iterator;
   using difference_type = IntrusiveList::difference_type;
 
   IRList::iterator main_block();
-  IRList::iterator make_if_block(IRList::iterator cur,
+  IRList::iterator make_if_block(const IRList::iterator& cur,
                                  IRInstruction* insn,
-                                 IRList::iterator* if_block);
-  IRList::iterator make_if_else_block(IRList::iterator cur,
+                                 IRList::iterator* false_block);
+  IRList::iterator make_if_else_block(const IRList::iterator& cur,
                                       IRInstruction* insn,
-                                      IRList::iterator* if_block,
-                                      IRList::iterator* else_block);
+                                      IRList::iterator* false_block,
+                                      IRList::iterator* true_block);
   IRList::iterator make_switch_block(
-      IRList::iterator cur,
+      const IRList::iterator& cur,
       IRInstruction* insn,
       IRList::iterator* default_block,
       std::map<SwitchIndices, IRList::iterator>& cases);
@@ -207,12 +437,33 @@ class IRList {
   size_t size() const { return m_list.size(); }
   bool empty() const { return m_list.empty(); }
 
+  /*
+   * Removes a subset of MFLOW_DEBUG instructions.
+   */
+  void cleanup_debug();
+
+  /*
+   * Removes a subset of MFLOW_DEBUG instructions. valid_regs
+   * is an accumulator set of registers used by either DBG_START_LOCAL
+   * or DBG_START_LOCAL_EXTENDED. The DBG_END_LOCAL and DBG_RESTART_LOCAL
+   * instructions are erased, unless valid_regs contains the registers they use.
+   */
+  void cleanup_debug(std::unordered_set<reg_t>& valid_regs);
+
+  /* DEPRECATED! Use the version below that passes in the iterator instead,
+   * which is O(1) instead of O(n). */
   /* Passes memory ownership of "from" to callee.  It will delete it. */
   void replace_opcode(IRInstruction* from, IRInstruction* to);
 
+  /* DEPRECATED! Use the version below that passes in the iterator instead,
+   * which is O(1) instead of O(n). */
   /* Passes memory ownership of "from" to callee.  It will delete it. */
   void replace_opcode(IRInstruction* to_delete,
-                      std::vector<IRInstruction*> replacements);
+                      const std::vector<IRInstruction*>& replacements);
+
+  /* Passes memory ownership of "from" to callee.  It will delete it. */
+  void replace_opcode(const IRList::iterator& it,
+                      const std::vector<IRInstruction*>& replacements);
 
   /*
    * Does exactly what it says and you SHOULD be afraid. This is mainly useful
@@ -230,7 +481,8 @@ class IRList {
    */
   boost::sub_range<IRList> get_param_instructions();
 
-  bool structural_equals(const IRList& other) const;
+  bool structural_equals(const IRList& other,
+                         const InstructionEquality& instruction_equals) const;
 
   /* Passes memory ownership of "mie" to callee. */
   void push_back(MethodItemEntry& mie) { m_list.push_back(mie); }
@@ -283,14 +535,14 @@ class IRList {
    */
   void remove_opcode(const IRList::iterator& it);
 
-  /* This method will delete the switch case where insn resides. */
-  void remove_switch_case(IRInstruction* insn);
-
   /*
    * Returns an estimated of the number of 2-byte code units needed to encode
    * all the instructions.
    */
   size_t sum_opcode_sizes() const;
+
+  // similar to sum_opcode_sizes, but takes into account non-opcode payloads
+  uint32_t estimate_code_units() const;
 
   /*
    * Returns the number of instructions.
@@ -299,22 +551,22 @@ class IRList {
 
   // transfer all of `other` into `this` starting at `pos`
   // memory ownership is also transferred
-  void splice(IRList::const_iterator pos, IRList& other) {
+  void splice(const IRList::const_iterator& pos, IRList& other) {
     m_list.splice(pos, other.m_list);
   }
 
   // transfer `other[begin]` to `other[end]` into `this` starting at `pos`
   // memory ownership is also transferred
-  void splice_selection(IRList::const_iterator pos,
+  void splice_selection(const IRList::const_iterator& pos,
                         IRList& other,
-                        IRList::const_iterator begin,
-                        IRList::const_iterator end) {
+                        const IRList::const_iterator& begin,
+                        const IRList::const_iterator& end) {
     m_list.splice(pos, other.m_list, begin, end);
   }
 
-  void remove_and_dispose_if(
-      std::function<bool(const MethodItemEntry&)> predicate) {
-    m_list.remove_and_dispose_if(predicate, IRListDisposer());
+  template <typename Predicate>
+  void remove_and_dispose_if(Predicate predicate) {
+    m_list.remove_and_dispose_if(predicate, disposer);
   }
 
   void sanity_check() const;
@@ -327,18 +579,28 @@ class IRList {
   IRList::const_iterator cend() const { return m_list.cend(); }
   IRList::reverse_iterator rbegin() { return m_list.rbegin(); }
   IRList::reverse_iterator rend() { return m_list.rend(); }
+  IRList::const_reverse_iterator rbegin() const { return m_list.rbegin(); }
+  IRList::const_reverse_iterator rend() const { return m_list.rend(); }
 
   void gather_catch_types(std::vector<DexType*>& ltype) const;
-  void gather_strings(std::vector<DexString*>& lstring) const;
+  void gather_strings(std::vector<const DexString*>& lstring) const;
   void gather_types(std::vector<DexType*>& ltype) const;
+  void gather_init_classes(std::vector<DexType*>& ltype) const;
   void gather_fields(std::vector<DexFieldRef*>& lfield) const;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const;
+  void gather_callsites(std::vector<DexCallSite*>& lcallsite) const;
+  void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
 
-  IRList::iterator erase(IRList::iterator it) { return m_list.erase(it); }
-  IRList::iterator erase_and_dispose(IRList::iterator it) {
-    return m_list.erase_and_dispose(it, IRListDisposer());
+  IRList::iterator erase(const IRList::iterator& it) {
+    return m_list.erase(it);
   }
-  void clear_and_dispose() { m_list.clear_and_dispose(IRListDisposer()); }
+  IRList::iterator erase_and_dispose(const IRList::iterator& it) {
+    return m_list.erase_and_dispose(it, disposer);
+  }
+  IRList::iterator insn_erase_and_dispose(const IRList::iterator& it);
+
+  void clear_and_dispose() { m_list.clear_and_dispose(disposer); }
+  void insn_clear_and_dispose();
 
   IRList::iterator iterator_to(MethodItemEntry& mie) {
     return m_list.iterator_to(mie);
@@ -348,7 +610,16 @@ class IRList {
     return m_list.iterator_to(mie);
   }
 
-  IRList::difference_type index_of(const MethodItemEntry& mie) const;
+  enum class ConsecutiveStyle {
+    kChain,
+    kDrop,
+    kMax, // This is for as long as kDrop is not correct because of profile
+          // issues.
+  };
+  static ConsecutiveStyle CONSECUTIVE_STYLE;
+
+  void chain_consecutive_source_blocks(
+      ConsecutiveStyle style = CONSECUTIVE_STYLE);
 
   friend std::string show(const IRCode*);
 };
@@ -365,7 +636,6 @@ class InstructionIteratorImpl {
       conditional<is_const, const MethodItemEntry, MethodItemEntry>::type;
 
  private:
-
   Iterator m_it;
   Iterator m_end;
   /*
@@ -377,18 +647,36 @@ class InstructionIteratorImpl {
       ++m_it;
     }
   }
+  /*
+   * If m_it doesn't point to an MIE of type MFLOW_OPCODE, decrement it until
+   * it does. Otherwise do nothing.
+   */
+  void to_prev_instruction() {
+    while (m_it->type != MFLOW_OPCODE) {
+      --m_it;
+    }
+  }
 
  public:
   using difference_type = long;
   using value_type = Mie&;
   using pointer = Mie*;
   using reference = Mie&;
-  using iterator_category = std::forward_iterator_tag;
+  using iterator_category = std::bidirectional_iterator_tag;
 
   InstructionIteratorImpl() {}
-  InstructionIteratorImpl(Iterator it, Iterator end)
-      : m_it(it), m_end(end) {
+  InstructionIteratorImpl(Iterator it, Iterator end) : m_it(it), m_end(end) {
     to_next_instruction();
+  }
+
+  InstructionIteratorImpl(const InstructionIteratorImpl<false>& rhs)
+      : m_it(rhs.m_it), m_end(rhs.m_end) {}
+
+  InstructionIteratorImpl& operator=(
+      const InstructionIteratorImpl<false>& rhs) {
+    m_it = rhs.m_it;
+    m_end = rhs.m_end;
+    return *this;
   }
 
   InstructionIteratorImpl& operator++() {
@@ -400,6 +688,18 @@ class InstructionIteratorImpl {
   InstructionIteratorImpl operator++(int) {
     auto rv = *this;
     ++(*this);
+    return rv;
+  }
+
+  InstructionIteratorImpl& operator--() {
+    --m_it;
+    to_prev_instruction();
+    return *this;
+  }
+
+  InstructionIteratorImpl operator--(int) {
+    auto rv = *this;
+    --(*this);
     return rv;
   }
 
@@ -421,6 +721,9 @@ class InstructionIteratorImpl {
     m_it = it;
     to_next_instruction();
   }
+
+  template <bool kConst>
+  friend class InstructionIteratorImpl;
 };
 
 template <bool is_const>
@@ -434,17 +737,16 @@ class InstructionIterableImpl {
   // Only callable by ConstInstructionIterable. If this were public, we may try
   // to bind const iterators to non-const members
   template <class T>
-  InstructionIterableImpl(
-      const T& mentry_list,
-      // we add this unused parameter so we don't accidentally resolve to this
-      // constructor when we meant to call the non-const version
-      bool /* unused */)
+  InstructionIterableImpl(const T& mentry_list,
+                          // we add this unused parameter so we don't
+                          // accidentally resolve to this constructor when we
+                          // meant to call the non-const version
+                          bool /* unused */)
       : m_begin(mentry_list.begin()), m_end(mentry_list.end()) {}
 
  public:
   template <class T>
-  explicit InstructionIterableImpl(
-      T& mentry_list)
+  explicit InstructionIterableImpl(T& mentry_list)
       : m_begin(mentry_list.begin()), m_end(mentry_list.end()) {}
 
   template <typename T>
@@ -460,22 +762,6 @@ class InstructionIterableImpl {
   }
 
   bool empty() const { return begin() == end(); }
-
-  bool structural_equals(const InstructionIterableImpl& other) {
-    auto it1 = this->begin();
-    auto it2 = other.begin();
-
-    for (; it1 != this->end() && it2 != other.end(); ++it1, ++it2) {
-      auto& mie1 = *it1;
-      auto& mie2 = *it2;
-
-      if (*mie1.insn != *mie2.insn) {
-        return false;
-      }
-    }
-
-    return it1 == this->end() && it2 == other.end();
-  }
 };
 
 using InstructionIterator = InstructionIteratorImpl<false>;
@@ -487,17 +773,17 @@ class ConstInstructionIterable : public InstructionIterableImpl<true> {
   // We extend the Impl so we can add the const versions of the constructors.
   // We can't have the const constructors on the non-const iterables
   template <class T>
-  explicit ConstInstructionIterable(
-      const T& mentry_list)
+  explicit ConstInstructionIterable(const T& mentry_list)
       : InstructionIterableImpl<true>(mentry_list, false) {}
 
   template <class T>
-  explicit ConstInstructionIterable(
-      const T* mentry_list)
+  explicit ConstInstructionIterable(const T* mentry_list)
       : ConstInstructionIterable(*mentry_list) {}
 };
 
 IRInstruction* primary_instruction_of_move_result_pseudo(IRList::iterator it);
+
+IRInstruction* primary_instruction_of_move_result(IRList::iterator it);
 
 IRInstruction* move_result_pseudo_of(IRList::iterator it);
 

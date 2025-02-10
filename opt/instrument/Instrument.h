@@ -1,42 +1,118 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "Pass.h"
 #include "PassManager.h"
 
-#include <unordered_set>
+class DexMethod;
+
+namespace interdex {
+class InterDexPassPlugin;
+} // namespace interdex
+
+namespace instrument {
+
+enum class ProfileTypeFlags {
+  NotSpecified = 0,
+  MethodCallCount = 1,
+  MethodCallOrder = 2,
+  BlockCoverage = 4,
+  BlockCount = 8,
+  SimpleMethodTracing = 1 | 2,
+  BasicBlockTracing = 1 | 2 | 4,
+  BasicBlockHitCount = 1 | 2 | 4 | 8,
+};
 
 class InstrumentPass : public Pass {
  public:
-  InstrumentPass() : Pass("InstrumentPass") {}
+  InstrumentPass();
+  ~InstrumentPass();
 
-  virtual void configure_pass(const PassConfig& pc) override {
-    pc.get("analysis_class_name", "", m_analysis_class_name);
-    pc.get("onMethodBegin_name", "", m_onMethodBegin_name);
-    pc.get("num_stats_per_method", 1, m_num_stats_per_method);
-    pc.get("method_index_file_name", "instrument-methods-idx.txt",
-           m_method_index_file_name);
-
-    std::vector<std::string> exclude_list;
-    pc.get("exclude", {}, exclude_list);
-    for (const auto& e : exclude_list) {
-      m_exclude.insert(e);
-    }
+  redex_properties::PropertyInteractions get_property_interactions()
+      const override {
+    using namespace redex_properties::interactions;
+    using namespace redex_properties::names;
+    return {
+        {DexLimitsObeyed, Preserves},
+        {HasSourceBlocks, Requires},
+        {NoResolvablePureRefs, Preserves},
+        {SpuriousGetClassCallsInterned, RequiresAndPreserves},
+        {RenameClass, Preserves},
+    };
   }
 
-  virtual void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
+  void bind_config() override;
+  void eval_pass(DexStoresVector& stores,
+                 ConfigFiles& conf,
+                 PassManager& mgr) override;
+  void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
+
+  // Helper functions for both method and block instrumentations.
+  //
+  constexpr static const char* STATS_FIELD_NAME = "sMethodStats";
+  constexpr static const char* HIT_STATS_FIELD_NAME = "sHitStats";
+
+  static void patch_array_size(DexClass* analysis_cls,
+                               const std::string_view array_name,
+                               const int array_size);
+  static void patch_static_field(DexClass* analysis_cls,
+                                 const std::string_view field_name,
+                                 const int new_number);
+  static bool is_included(const DexMethod* method,
+                          const std::unordered_set<std::string>& set);
+
+  static std::unordered_map<int /*shard_num*/, DexFieldRef*>
+  patch_sharded_arrays(
+      DexClass* cls,
+      const size_t num_shards,
+      const std::map<int /*shard_num*/, std::string>& suggested_names = {});
+
+  static std::pair<std::unordered_map<int /*shard_num*/, DexMethod*>,
+                   std::unordered_set<std::string>>
+  generate_sharded_analysis_methods(
+      DexClass* cls,
+      const std::string& template_method_full_name,
+      const std::unordered_map<int /*shard_num*/, DexFieldRef*>& array_fields,
+      const size_t num_shards);
+
+  struct Options {
+    std::string instrumentation_strategy;
+    std::string analysis_class_name;
+    std::string analysis_method_name;
+    std::unordered_set<std::string> blocklist;
+    std::unordered_set<std::string> allowlist;
+    std::string blocklist_file_name;
+    std::string metadata_file_name;
+    int64_t num_stats_per_method;
+    int64_t num_shards;
+    bool only_cold_start_class;
+    std::unordered_map<DexMethod*, DexMethod*> methods_replacement;
+    std::vector<std::string> analysis_method_names;
+    int64_t max_num_blocks;
+    bool instrument_catches;
+    bool instrument_blocks_without_source_block;
+    bool instrument_only_root_store;
+    bool inline_onBlockHit;
+    bool inline_onNonLoopBlockHit;
+    bool apply_CSE_CopyProp;
+    std::optional<std::string> analysis_package_prefix;
+  };
 
  private:
-  std::string m_analysis_class_name;
-  std::string m_onMethodBegin_name;
-  int64_t m_num_stats_per_method;
-  std::string m_method_index_file_name;
-  std::unordered_set<std::string> m_exclude;
+  Options m_options;
+  std::unique_ptr<interdex::InterDexPassPlugin> m_plugin;
+  std::optional<ReserveRefsInfoHandle> m_reserved_refs_handle;
+  std::optional<size_t> m_integrity_types;
 };
+
+} // namespace instrument

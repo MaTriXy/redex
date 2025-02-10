@@ -1,19 +1,21 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "RedundantCheckCastRemover.h"
 
 #include <unordered_map>
 
+#include "DexClass.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "Match.h"
+#include "PassManager.h"
+#include "Show.h"
+#include "Trace.h"
 #include "Walkers.h"
 
 RedundantCheckCastRemover::RedundantCheckCastRemover(
@@ -21,25 +23,30 @@ RedundantCheckCastRemover::RedundantCheckCastRemover(
     : m_mgr(mgr), m_scope(scope) {}
 
 void RedundantCheckCastRemover::run() {
-  auto match = std::make_tuple(m::invoke(),
-                               m::is_opcode(OPCODE_MOVE_RESULT_OBJECT),
-                               m::is_opcode(OPCODE_CHECK_CAST),
-                               m::is_opcode(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT));
+  auto match = std::make_tuple(m::an_invoke(),
+                               m::move_result_object_(),
+                               m::check_cast_(),
+                               m::move_result_pseudo_object_());
 
   std::unordered_map<DexMethod*, std::vector<IRInstruction*>> to_remove;
 
-  std::atomic<uint32_t> num_check_casts_removed;
+  std::atomic<uint32_t> num_check_casts_removed(0);
   walk::parallel::matching_opcodes_in_block(
       m_scope,
       match,
-      [](DexMethod* method, cfg::Block*, const std::vector<IRInstruction*>& insns) {
+      [&num_check_casts_removed](DexMethod* method,
+                                 cfg::Block*,
+                                 const std::vector<IRInstruction*>& insns) {
         if (RedundantCheckCastRemover::can_remove_check_cast(insns)) {
           IRInstruction* check_cast = insns[2];
-          method->get_code()->remove_opcode(check_cast);
+          auto& cfg = method->get_code()->cfg();
+          auto pos_it = cfg.find_insn(check_cast);
+          cfg.remove_insn(pos_it);
+          num_check_casts_removed++;
 
-          TRACE(PEEPHOLE, 8, "redundant check cast in %s\n", SHOW(method));
+          TRACE(PEEPHOLE, 8, "redundant check cast in %s", SHOW(method));
           for (IRInstruction* insn : insns) {
-            TRACE(PEEPHOLE, 8, "  %s\n", SHOW(insn));
+            TRACE(PEEPHOLE, 8, "  %s", SHOW(insn));
           }
         }
       });
@@ -59,5 +66,5 @@ bool RedundantCheckCastRemover::can_remove_check_cast(
   auto check_type = check_cast_op->get_type();
   return move_result_op->dest() == check_cast_op->src(0) &&
          move_result_pseudo->dest() == check_cast_op->src(0) &&
-         check_cast(invoke_return, check_type);
+         type::check_cast(invoke_return, check_type);
 }

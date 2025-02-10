@@ -1,15 +1,19 @@
-/**
- * Copyright (c) 2018-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "SwitchDispatch.h"
 
+#include <cmath>
+
 #include "Creators.h"
+#include "ScopedCFG.h"
+#include "Show.h"
+#include "SourceBlocks.h"
+#include "Trace.h"
 #include "TypeReference.h"
 
 using namespace type_reference;
@@ -28,19 +32,23 @@ constexpr uint64_t MAX_NUM_DISPATCH_TARGET = 500;
  * is too large. See https://code.google.com/p/android/issues/detail?id=66655.
  *
  * Although the limit is only applicable to dex2oat dependent build, we want to
- * avoid that from happening wherever Type Erasure is enabled. Since we want to
+ * avoid that from happening wherever Class Merging is enabled. Since we want to
  * leave some room for accommodating the injected switch dispatch code, the
  * number here is lower than the actual limit.
  */
 constexpr uint64_t MAX_NUM_DISPATCH_INSTRUCTION = 40000;
 
-MethodCreator* init_method_creator(const dispatch::Spec& spec,
-                                   DexMethod* orig_method) {
-  return new MethodCreator(spec.owner_type,
-                           DexString::make_string(spec.name),
-                           spec.proto,
-                           spec.access_flags,
-                           orig_method->get_anno_set());
+MethodCreator init_method_creator(const dispatch::Spec& spec,
+                                  DexMethod* orig_method) {
+  return MethodCreator(
+      spec.owner_type,
+      DexString::make_string(spec.name),
+      spec.proto,
+      spec.access_flags,
+      orig_method->get_anno_set() == nullptr
+          ? std::unique_ptr<DexAnnotationSet>()
+          : std::make_unique<DexAnnotationSet>(*orig_method->get_anno_set()),
+      spec.keep_debug_info);
 }
 
 void emit_call(const dispatch::Spec& spec,
@@ -59,20 +67,30 @@ void invoke_static(const dispatch::Spec& spec,
                    const std::vector<Location>& args,
                    Location& res_loc,
                    DexMethod* callee,
-                   MethodBlock* block) {
+                   MethodBlock* block,
+                   MethodCreator& mc) {
+  auto sb = source_blocks::get_first_source_block_of_method(callee);
+  if (sb) {
+    block->push_source_block(
+        source_blocks::clone_as_synthetic(sb, mc.get_method()->as_def(), {sb}));
+  }
   emit_call(spec, OPCODE_INVOKE_STATIC, args, res_loc, callee, block);
 }
 
 void emit_check_cast(const dispatch::Spec& spec,
                      std::vector<Location>& args,
                      DexMethod* callee,
-                     MethodBlock* block) {
-  if (args.size() && spec.proto->get_args()->size()) {
-    auto dispatch_head_arg_type =
-        spec.proto->get_args()->get_type_list().front();
-    auto callee_head_arg_type =
-        callee->get_proto()->get_args()->get_type_list().front();
+                     MethodBlock* block,
+                     MethodCreator& mc) {
+  if (!args.empty() && !spec.proto->get_args()->empty()) {
+    auto dispatch_head_arg_type = spec.proto->get_args()->at(0);
+    auto callee_head_arg_type = callee->get_proto()->get_args()->at(0);
     if (dispatch_head_arg_type != callee_head_arg_type) {
+      auto sb = source_blocks::get_first_source_block_of_method(callee);
+      if (sb) {
+        block->push_source_block(source_blocks::clone_as_synthetic(
+            sb, mc.get_method()->as_def(), {sb}));
+      }
       block->check_cast(args.front(), callee_head_arg_type);
     }
   }
@@ -83,17 +101,17 @@ void emit_check_cast(const dispatch::Spec& spec,
  * dummy Location here. In this case, the subsequent return instruciton will be
  * a no-op one.
  */
-Location get_return_location(const dispatch::Spec& spec, MethodCreator* mc) {
-  return spec.proto->is_void() ? mc->get_local(0) // not used
-                               : mc->make_local(spec.proto->get_rtype());
+Location get_return_location(const dispatch::Spec& spec, MethodCreator& mc) {
+  return spec.proto->is_void() ? mc.get_local(0) // not used
+                               : mc.make_local(spec.proto->get_rtype());
 }
 
 bool save_type_tag_to_field(const dispatch::Spec& spec) {
-  return spec.type == dispatch::Type::CTOR_WITH_TYPE_TAG_PARAM;
+  return spec.type == dispatch::Type::CTOR_SAVE_TYPE_TAG_PARAM;
 }
 
 bool is_ctor(const dispatch::Spec& spec) {
-  return spec.type == dispatch::Type::CTOR_WITH_TYPE_TAG_PARAM ||
+  return spec.type == dispatch::Type::CTOR_SAVE_TYPE_TAG_PARAM ||
          spec.type == dispatch::Type::CTOR;
 }
 
@@ -105,23 +123,38 @@ void handle_default_block(
     const dispatch::Spec& spec,
     const std::map<SwitchIndices, DexMethod*>& indices_to_callee,
     const std::vector<Location>& args,
+    MethodCreator& mc,
     Location& ret_loc,
     MethodBlock* def_block) {
   if (is_ctor(spec)) {
     // Handle the last case in default block.
     auto last_indices = indices_to_callee.rbegin()->first;
     auto last_callee = indices_to_callee.at(last_indices);
-    invoke_static(spec, args, ret_loc, last_callee, def_block);
+    invoke_static(spec, args, ret_loc, last_callee, def_block, mc);
     return;
   }
   if (spec.overridden_meth) {
     always_assert_log(spec.overridden_meth->is_virtual(),
                       "non-virtual overridden method %s\n",
                       SHOW(spec.overridden_meth));
+    // Note that the overridden can be an default interface or external default
+    // interface method.
+    auto artificial_pos = std::make_unique<DexPosition>(
+        DexString::make_string(show_deobfuscated(spec.overridden_meth)),
+        DexString::make_string("UnknownSource"), 0);
+    def_block->push_position(std::move(artificial_pos));
     emit_call(spec, OPCODE_INVOKE_SUPER, args, ret_loc, spec.overridden_meth,
               def_block);
   } else if (!spec.proto->is_void()) {
-    def_block->init_loc(ret_loc);
+    // dex2oat doesn't verify the simple init if the return type is an array
+    // type.
+    if (type::is_array(spec.proto->get_rtype())) {
+      Location size_loc = mc.make_local(type::_int());
+      def_block->init_loc(size_loc);
+      def_block->new_array(spec.proto->get_rtype(), size_loc, ret_loc);
+    } else {
+      def_block->init_loc(ret_loc);
+    }
   }
 }
 
@@ -146,15 +179,72 @@ std::map<SwitchIndices, MethodBlock*> get_switch_cases(
   return cases;
 }
 
-DexMethod* materialize_dispatch(DexMethod* orig_method, MethodCreator* mc) {
-  auto dispatch = mc->create();
+SourceBlock* get_template_source_block(
+    const std::map<SwitchIndices, DexMethod*>& indices_to_callee) {
+  std::vector<const DexMethod*> methods;
+  methods.reserve(indices_to_callee.size());
+  for (auto&& [_, m] : indices_to_callee) {
+    methods.push_back(m);
+  }
+  auto sb = source_blocks::get_any_first_source_block_of_methods(methods);
+  if (sb) {
+    for (auto m : methods) {
+      sb->max(*source_blocks::get_first_source_block_of_method(m));
+    }
+    return sb;
+  }
+  return sb;
+}
+
+// add the template source block to all dispatch blocks that don't have
+// source blocks
+void add_remaining_source_blocks_to_dispatch(DexMethod* dispatch,
+                                             SourceBlock* template_sb) {
+  auto* code = dispatch->get_code();
+  cfg::ScopedCFG cfg(code);
+  for (auto* block : cfg->blocks()) {
+    if (block == cfg->entry_block()) {
+      continue;
+    }
+    auto source_block = source_blocks::get_first_source_block(block);
+    if (source_block) {
+      continue;
+    }
+    std::unique_ptr<SourceBlock> new_sb =
+        source_blocks::clone_as_synthetic(template_sb, dispatch, {template_sb});
+    auto it = block->get_first_insn();
+    if (it != block->end() && opcode::is_move_result_any(it->insn->opcode())) {
+      block->insert_after(it, std::move(new_sb));
+    } else {
+      block->insert_before(it, std::move(new_sb));
+    }
+  }
+
+  auto* block = cfg->entry_block();
+  auto source_block = source_blocks::get_first_source_block(block);
+  if (!source_block) {
+    auto new_sb =
+        source_blocks::clone_as_synthetic(template_sb, dispatch, {template_sb});
+    auto it = block->get_first_non_param_loading_insn();
+    block->insert_before(it, std::move(new_sb));
+  }
+}
+
+DexMethod* materialize_dispatch(DexMethod* orig_method,
+                                MethodCreator& mc,
+                                SourceBlock* template_sb) {
+  auto dispatch = mc.create();
   dispatch->rstate = orig_method->rstate;
   set_public(dispatch);
   TRACE(SDIS,
         9,
-        " created dispatch: %s\n%s\n",
+        " created dispatch: %s\n%s",
         SHOW(dispatch),
         SHOW(dispatch->get_code()));
+
+  if (template_sb) {
+    add_remaining_source_blocks_to_dispatch(dispatch, template_sb);
+  }
 
   return dispatch;
 }
@@ -163,11 +253,11 @@ DexMethod* materialize_dispatch(DexMethod* orig_method, MethodCreator* mc) {
  * Given all the method targets have the same proto, args will be the same
  * between them.
  */
-std::vector<Location> get_args_from(DexMethod* method, MethodCreator* mc) {
+std::vector<Location> get_args_from(DexMethod* method, MethodCreator& mc) {
   std::vector<Location> args;
   size_t args_size = method->get_proto()->get_args()->size();
   for (size_t arg_loc = 0; arg_loc < args_size; ++arg_loc) {
-    args.push_back(mc->get_local(arg_loc));
+    args.push_back(mc.get_local(arg_loc));
   }
 
   return args;
@@ -180,11 +270,12 @@ size_t estimate_num_switch_dispatch_needed(
   size_t num_cases = indices_to_callee.size();
   // If the config is enabled we shortcut the instruction count limit.
   // This should only happen for testing.
-  TRACE(SDIS, 9, "num cases %d, max num dispatch targets %d\n", num_cases,
+  TRACE(SDIS, 9, "num cases %zu, max num dispatch targets %zu", num_cases,
         max_num_dispatch_target.get_value_or(0));
   if (max_num_dispatch_target != boost::none &&
       num_cases > max_num_dispatch_target.get()) {
-    return ceil(static_cast<float>(num_cases) / max_num_dispatch_target.get());
+    return std::ceil(static_cast<float>(num_cases) /
+                     max_num_dispatch_target.get());
   }
   if (num_cases > MAX_NUM_DISPATCH_TARGET) {
     size_t total_num_insn = 0;
@@ -193,8 +284,8 @@ size_t estimate_num_switch_dispatch_needed(
       total_num_insn += target->get_code()->count_opcodes();
     }
 
-    return ceil(static_cast<float>(total_num_insn) /
-                MAX_NUM_DISPATCH_INSTRUCTION);
+    return std::ceil(static_cast<float>(total_num_insn) /
+                     MAX_NUM_DISPATCH_INSTRUCTION);
   }
 
   return 1;
@@ -207,28 +298,29 @@ size_t estimate_num_switch_dispatch_needed(
 DexMethod* create_simple_switch_dispatch(
     const dispatch::Spec& spec,
     const std::map<SwitchIndices, DexMethod*>& indices_to_callee) {
-  always_assert(indices_to_callee.size());
+  always_assert(!indices_to_callee.empty());
   TRACE(SDIS,
         5,
-        "creating leaf switch dispatch %s.%s for targets of size %d\n",
+        "creating leaf switch dispatch %s.%s for targets of size %zu",
         SHOW(spec.owner_type),
         spec.name.c_str(),
         indices_to_callee.size());
   auto orig_method = indices_to_callee.begin()->second;
   auto mc = init_method_creator(spec, orig_method);
-  auto self_loc = mc->get_local(0);
+  auto self_loc = mc.get_local(0);
   // iget type tag field.
-  auto type_tag_loc = mc->make_local(get_int_type());
+  auto type_tag_loc = mc.make_local(type::_int());
   auto ret_loc = get_return_location(spec, mc);
-  auto mb = mc->get_main_block();
+  auto mb = mc.get_main_block();
 
   std::vector<Location> args = get_args_from(orig_method, mc);
 
   // Extra checks if there is no need for the switch statement.
   if (is_single_target_case(spec, indices_to_callee)) {
-    invoke_static(spec, args, ret_loc, orig_method, mb);
+    invoke_static(spec, args, ret_loc, orig_method, mb, mc);
     mb->ret(spec.proto->get_rtype(), ret_loc);
-    return materialize_dispatch(orig_method, mc);
+    auto template_sb = get_template_source_block(indices_to_callee);
+    return materialize_dispatch(orig_method, mc, template_sb);
   }
 
   mb->iget(spec.type_tag_field, self_loc, type_tag_loc);
@@ -236,7 +328,7 @@ DexMethod* create_simple_switch_dispatch(
 
   // default case and return
   auto def_block = mb->switch_op(type_tag_loc, cases);
-  handle_default_block(spec, indices_to_callee, args, ret_loc, def_block);
+  handle_default_block(spec, indices_to_callee, args, mc, ret_loc, def_block);
   mb->ret(spec.proto->get_rtype(), ret_loc);
 
   for (auto& case_it : cases) {
@@ -245,11 +337,12 @@ DexMethod* create_simple_switch_dispatch(
     auto callee = indices_to_callee.at(case_it.first);
     always_assert(is_static(callee));
     // check-cast and call
-    emit_check_cast(spec, args, callee, case_block);
-    invoke_static(spec, args, ret_loc, callee, case_block);
+    emit_check_cast(spec, args, callee, case_block, mc);
+    invoke_static(spec, args, ret_loc, callee, case_block, mc);
   }
 
-  return materialize_dispatch(orig_method, mc);
+  auto template_sb = get_template_source_block(indices_to_callee);
+  return materialize_dispatch(orig_method, mc, template_sb);
 }
 
 dispatch::DispatchMethod create_two_level_switch_dispatch(
@@ -258,10 +351,10 @@ dispatch::DispatchMethod create_two_level_switch_dispatch(
     const std::map<SwitchIndices, DexMethod*>& indices_to_callee) {
   auto orig_method = indices_to_callee.begin()->second;
   auto mc = init_method_creator(spec, orig_method);
-  auto self_loc = mc->get_local(0);
+  auto self_loc = mc.get_local(0);
   // iget type tag field.
-  auto type_tag_loc = mc->make_local(get_int_type());
-  auto mb = mc->get_main_block();
+  auto type_tag_loc = mc.make_local(type::_int());
+  auto mb = mc.get_main_block();
   auto ret_loc = get_return_location(spec, mc);
 
   std::vector<Location> args = get_args_from(orig_method, mc);
@@ -271,7 +364,7 @@ dispatch::DispatchMethod create_two_level_switch_dispatch(
 
   // default case and return
   auto def_block = mb->switch_op(type_tag_loc, cases);
-  handle_default_block(spec, indices_to_callee, args, ret_loc, def_block);
+  handle_default_block(spec, indices_to_callee, args, mc, ret_loc, def_block);
   mb->ret(spec.proto->get_rtype(), ret_loc);
 
   size_t max_num_leaf_switch = cases.size() / num_switch_needed + 1;
@@ -287,19 +380,17 @@ dispatch::DispatchMethod create_two_level_switch_dispatch(
     if (subcase_count == max_num_leaf_switch ||
         case_index == cases.size() - 1) {
       auto sub_name = spec.name + "$" + std::to_string(dispatch_index);
-      auto new_arg_list =
-          prepend_and_make(spec.proto->get_args(), spec.owner_type);
+      auto new_arg_list = spec.proto->get_args()->push_front(spec.owner_type);
       auto static_dispatch_proto =
           DexProto::make_proto(spec.proto->get_rtype(), new_arg_list);
-      dispatch::Spec sub_spec{
-          spec.owner_type,
-          dispatch::Type::VIRTUAL,
-          sub_name,
-          static_dispatch_proto,
-          spec.access_flags | ACC_STATIC,
-          spec.type_tag_field,
-          nullptr // overridden_method
-      };
+      dispatch::Spec sub_spec{spec.owner_type,
+                              dispatch::Type::VIRTUAL,
+                              sub_name,
+                              static_dispatch_proto,
+                              spec.access_flags | ACC_STATIC,
+                              spec.type_tag_field,
+                              nullptr, // overridden_method,
+                              spec.keep_debug_info};
       auto sub_dispatch =
           create_simple_switch_dispatch(sub_spec, sub_indices_to_callee);
       sub_indices_to_callee.clear();
@@ -307,8 +398,8 @@ dispatch::DispatchMethod create_two_level_switch_dispatch(
       auto case_block = case_it.second;
       always_assert(case_block != nullptr);
       // check-cast and call
-      emit_check_cast(spec, args, sub_dispatch, case_block);
-      invoke_static(spec, args, ret_loc, sub_dispatch, case_block);
+      emit_check_cast(spec, args, sub_dispatch, case_block, mc);
+      invoke_static(spec, args, ret_loc, sub_dispatch, case_block, mc);
 
       sub_dispatches.push_back(sub_dispatch);
       dispatch_index++;
@@ -318,7 +409,8 @@ dispatch::DispatchMethod create_two_level_switch_dispatch(
     case_index++;
   }
 
-  auto dispatch_meth = materialize_dispatch(orig_method, mc);
+  auto template_sb = get_template_source_block(indices_to_callee);
+  auto dispatch_meth = materialize_dispatch(orig_method, mc, nullptr);
 
   /////////////////////////////////////////////////////////////////////////////
   // Remove unwanted gotos.
@@ -377,7 +469,7 @@ dispatch::DispatchMethod create_two_level_switch_dispatch(
   std::vector<IRList::iterator> to_delete;
   auto code = dispatch_meth->get_code();
   for (auto it = code->begin(); it != code->end(); ++it) {
-    if (it->type == MFLOW_OPCODE && is_goto(it->insn->opcode()) &&
+    if (it->type == MFLOW_OPCODE && opcode::is_goto(it->insn->opcode()) &&
         std::prev(it)->type == MFLOW_TARGET) {
       to_delete.emplace_back(it);
     }
@@ -387,15 +479,130 @@ dispatch::DispatchMethod create_two_level_switch_dispatch(
     code->remove_opcode(it);
   }
 
-  TRACE(SDIS, 9, "dispatch: split dispatch %s\n%s\n", SHOW(dispatch_meth),
+  if (template_sb) {
+    add_remaining_source_blocks_to_dispatch(dispatch_meth, template_sb);
+  }
+
+  TRACE(SDIS, 9, "dispatch: split dispatch %s\n%s", SHOW(dispatch_meth),
         SHOW(dispatch_meth->get_code()));
   dispatch::DispatchMethod dispatch_method{dispatch_meth, sub_dispatches};
   return dispatch_method;
 }
 
+/**
+ * This is an informal classification since we only care about direct, static,
+ * virtual and constructor methods when creating dispatch method.
+ */
+dispatch::Type possible_type(DexMethod* method) {
+  if (method->is_external() || !method->get_code()) {
+    return dispatch::OTHER_TYPE;
+  }
+  if (method::is_init(method)) {
+    return dispatch::CTOR;
+  } else if (is_static(method)) {
+    return dispatch::STATIC;
+  } else if (method->is_virtual()) {
+    return dispatch::VIRTUAL;
+  } else {
+    return dispatch::DIRECT;
+  }
+}
+
+DexProto* append_int_arg(DexProto* proto) {
+  auto args_list = proto->get_args()->push_back(type::_int());
+  return DexProto::make_proto(proto->get_rtype(), args_list);
+}
+
+#define LOG_AND_RETURN(fmt, ...)                       \
+  do {                                                 \
+    fprintf(stderr, "[dispatch] " fmt, ##__VA_ARGS__); \
+    return nullptr;                                    \
+  } while (0)
+/**
+ * Check that all the methods have the the same proto and all of them should be
+ * direct, static, or virtual, create a method ref with an additional method tag
+ * argument.
+ */
+DexMethodRef* create_dispatch_method_ref(
+    const std::map<SwitchIndices, DexMethod*>& indices_to_callee) {
+
+  if (indices_to_callee.size() < 2) {
+    LOG_AND_RETURN("Not enough methods(should >= 2) in indices_to_callee %zu\n",
+                   indices_to_callee.size());
+  }
+  auto first_method = indices_to_callee.begin()->second;
+  auto this_type =
+      is_static(first_method) ? nullptr : first_method->get_class();
+  auto method_type = possible_type(first_method);
+  if (method_type != dispatch::STATIC && method_type != dispatch::VIRTUAL &&
+      method_type != dispatch::DIRECT) {
+    LOG_AND_RETURN("Unsuported method type %u(%x) for %s\n", method_type,
+                   first_method->get_access(), SHOW(first_method));
+  }
+
+  for (auto& p : indices_to_callee) {
+    auto meth = p.second;
+    auto cur_meth_type = possible_type(meth);
+    if (cur_meth_type != method_type) {
+      LOG_AND_RETURN(
+          "Different method type: %u(%x) for %s v.s. %u(%x) for %s\n",
+          method_type, first_method->get_access(), SHOW(first_method),
+          cur_meth_type, meth->get_access(), SHOW(meth));
+    }
+    if (this_type && this_type != meth->get_class()) {
+      LOG_AND_RETURN("Different `this` type : %s v.s. %s\n", SHOW(first_method),
+                     SHOW(meth));
+    }
+    if (meth->get_proto() != first_method->get_proto()) {
+      LOG_AND_RETURN("Different protos : %s v.s. %s\n", SHOW(first_method),
+                     SHOW(meth));
+    }
+  }
+  auto cls = first_method->get_class();
+  auto dispatch_proto = append_int_arg(first_method->get_proto());
+  auto dispatch_name =
+      dispatch::gen_dispatch_name(cls, dispatch_proto, first_method->str());
+  return DexMethod::make_method(cls, dispatch_name, dispatch_proto);
+}
+#undef LOG_AND_RETURN
+
+DexAccessFlags get_dispatch_access(DexMethod* origin_method) {
+  auto method_type = possible_type(origin_method);
+  if (method_type == dispatch::STATIC) {
+    return ACC_STATIC | ACC_PUBLIC;
+  } else if (method_type == dispatch::VIRTUAL) {
+    return ACC_PUBLIC;
+  } else {
+    always_assert(method_type == dispatch::DIRECT);
+    return ACC_PRIVATE;
+  }
+}
+
+size_t get_type_tag_location_for_ctor_and_static(const dispatch::Spec& spec,
+                                                 const DexTypeList* arg_list) {
+  if (spec.type == dispatch::Type::CTOR) {
+    if (spec.type_tag_param_idx) {
+      // The local variable idx is param idx + 1 because of the first implicit
+      // `this` argument to ctors.
+      return *spec.type_tag_param_idx + 1;
+    }
+    // No type tag. Return a dummy value.
+    return arg_list->size();
+  } else if (spec.type == dispatch::Type::CTOR_SAVE_TYPE_TAG_PARAM) {
+    return arg_list->size();
+  } else if (spec.type == dispatch::Type::STATIC) {
+    always_assert(is_static(spec.access_flags));
+    return arg_list->size() - 1;
+  }
+
+  not_reached_log("Unexpected dispatch type %d\n", spec.type);
+}
+
 } // namespace
 
 namespace dispatch {
+
+constexpr const char* DISPATCH_PREFIX = "$dispatch$";
 
 DispatchMethod create_virtual_dispatch(
     const Spec& spec,
@@ -409,7 +616,7 @@ DispatchMethod create_virtual_dispatch(
     return dispatch;
   }
 
-  TRACE(SDIS, 5, "splitting large dispatch %s.%s into %d\n",
+  TRACE(SDIS, 5, "splitting large dispatch %s.%s into %zu",
         SHOW(spec.owner_type), spec.name.c_str(), num_switch_needed);
   return create_two_level_switch_dispatch(num_switch_needed, spec,
                                           indices_to_callee);
@@ -418,21 +625,20 @@ DispatchMethod create_virtual_dispatch(
 DexMethod* create_ctor_or_static_dispatch(
     const Spec& spec,
     const std::map<SwitchIndices, DexMethod*>& indices_to_callee) {
-  always_assert(indices_to_callee.size() && spec.overridden_meth == nullptr);
+  always_assert(!indices_to_callee.empty() && spec.overridden_meth == nullptr);
   TRACE(SDIS,
         5,
-        "creating dispatch %s.%s for targets of size %d\n",
+        "creating dispatch %s.%s for targets of size %zu",
         SHOW(spec.owner_type),
         spec.name.c_str(),
         indices_to_callee.size());
   auto orig_method = indices_to_callee.begin()->second;
   auto mc = init_method_creator(spec, orig_method);
   auto dispatch_arg_list = spec.proto->get_args();
-  auto type_tag_loc =
-      mc->get_local(is_static(spec.access_flags) ? dispatch_arg_list->size() - 1
-                                                 : dispatch_arg_list->size());
+  auto type_tag_loc = mc.get_local(
+      get_type_tag_location_for_ctor_and_static(spec, dispatch_arg_list));
   auto ret_loc = get_return_location(spec, mc);
-  auto mb = mc->get_main_block();
+  auto mb = mc.get_main_block();
   // Set type tag field only when using synthesized type tags.
   // For the external type tag case (GQL), merged ctors take care of that
   // automatically.
@@ -445,17 +651,16 @@ DexMethod* create_ctor_or_static_dispatch(
   // corresponding keys in the map.
   std::vector<Location> args = get_args_from(orig_method, mc);
   if (is_single_target_case(spec, indices_to_callee)) {
-    invoke_static(spec, args, ret_loc, orig_method, mb);
+    invoke_static(spec, args, ret_loc, orig_method, mb, mc);
     mb->ret(spec.proto->get_rtype(), ret_loc);
-    return materialize_dispatch(orig_method, mc);
+    auto template_sb = get_template_source_block(indices_to_callee);
+    return materialize_dispatch(orig_method, mc, template_sb);
   }
 
   auto cases = get_switch_cases(indices_to_callee, is_ctor(spec));
 
-  // TODO (zwei): better dispatch? E.g., push down invoke-direct to the super
-  // ctor to happen after the switch stmt.
   auto def_block = mb->switch_op(type_tag_loc, cases);
-  handle_default_block(spec, indices_to_callee, args, ret_loc, def_block);
+  handle_default_block(spec, indices_to_callee, args, mc, ret_loc, def_block);
   mb->ret(spec.proto->get_rtype(), ret_loc);
 
   for (auto& case_it : cases) {
@@ -463,10 +668,98 @@ DexMethod* create_ctor_or_static_dispatch(
     always_assert(case_block != nullptr);
     auto callee = indices_to_callee.at(case_it.first);
     always_assert(is_static(callee));
-    invoke_static(spec, args, ret_loc, callee, case_block);
+    invoke_static(spec, args, ret_loc, callee, case_block, mc);
   }
 
-  return materialize_dispatch(orig_method, mc);
+  auto template_sb = get_template_source_block(indices_to_callee);
+  return materialize_dispatch(orig_method, mc, template_sb);
 }
 
+// TODO(fengliu): There are some redundant logic with other dispatch creating
+// methods, will do some refactor in near future.
+DexMethod* create_simple_dispatch(
+    const std::map<SwitchIndices, DexMethod*>& indices_to_callee,
+    DexAnnotationSet* anno,
+    bool with_debug_item) {
+  auto dispatch_ref = create_dispatch_method_ref(indices_to_callee);
+  if (!dispatch_ref) {
+    return nullptr;
+  }
+  auto return_type = dispatch_ref->get_proto()->get_rtype();
+  auto first_method = indices_to_callee.begin()->second;
+  auto access = get_dispatch_access(first_method);
+  MethodCreator mc(dispatch_ref, access, nullptr, true);
+  auto args = mc.get_reg_args();
+  auto method_tag_loc = *args.rbegin();
+  // The mc's last argument is a "method tag", pop the argument and pass the
+  // rest to the mergeables.
+  args.pop_back();
+  auto main_block = mc.get_main_block();
+
+  std::map<SwitchIndices, MethodBlock*> cases;
+  for (auto& p : indices_to_callee) {
+    cases[p.first] = nullptr;
+  }
+  /* default_block = */ main_block->switch_op(method_tag_loc, cases);
+  bool has_return_value = (return_type != type::_void());
+  auto res_loc =
+      has_return_value ? mc.make_local(return_type) : Location::empty();
+  for (auto& p : cases) {
+    auto case_block = p.second;
+    auto callee = indices_to_callee.at(p.first);
+    case_block->invoke(callee, args);
+    if (has_return_value) {
+      case_block->move_result(res_loc, return_type);
+      case_block->ret(res_loc);
+    } else {
+      case_block->ret_void();
+    }
+  }
+
+  auto method = mc.create();
+  method->rstate = first_method->rstate;
+  return method;
+}
+
+const DexString* gen_dispatch_name(DexType* owner,
+                                   DexProto* proto,
+                                   const std::string_view orig_name) {
+  auto simple_name = DexString::make_string(DISPATCH_PREFIX + orig_name);
+  if (DexMethod::get_method(owner, simple_name, proto) == nullptr) {
+    return simple_name;
+  }
+
+  size_t count = 0;
+  while (true) {
+    auto suffix = "$" + std::to_string(count);
+    auto dispatch_name = DexString::make_string(simple_name->str() + suffix);
+    auto existing_meth = DexMethod::get_method(owner, dispatch_name, proto);
+    if (existing_meth == nullptr) {
+      return dispatch_name;
+    }
+    ++count;
+  }
+}
+
+bool may_be_dispatch(const DexMethod* method) {
+  const auto name = method->str();
+  if (name.find(DISPATCH_PREFIX) != 0) {
+    return false;
+  }
+  auto code = const_cast<DexMethod*>(method)->get_code();
+  always_assert(code->editable_cfg_built());
+  auto& cfg = code->cfg();
+  uint32_t branches = 0;
+  for (auto& mie : cfg::InstructionIterable(cfg)) {
+    auto op = mie.insn->opcode();
+    if (opcode::is_switch(op)) {
+      return true;
+    }
+    branches += opcode::is_a_conditional_branch(op);
+    if (branches > 1) {
+      return true;
+    }
+  }
+  return false;
+}
 } // namespace dispatch

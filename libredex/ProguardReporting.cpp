@@ -1,18 +1,20 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "ProguardReporting.h"
+
+#include <iostream>
+#include <ostream>
+
 #include "DexClass.h"
 #include "ReachableClasses.h"
 
-std::string extract_suffix(std::string class_name) {
-  auto i = class_name.find_last_of(".");
+std::string_view extract_suffix(std::string_view class_name) {
+  auto i = class_name.find_last_of('.');
   if (i == std::string::npos) {
     // This is a class name with no package prefix.
     return class_name;
@@ -20,24 +22,8 @@ std::string extract_suffix(std::string class_name) {
   return class_name.substr(i + 1);
 }
 
-std::string redex::dexdump_name_to_dot_name(const std::string& dexdump_name) {
-  assert(!dexdump_name.empty());
-  std::string s;
-  for (const char& ch : dexdump_name.substr(1)) {
-    if (ch == '/') {
-      s += '.';
-      continue;
-    }
-    if (ch == ';') {
-      continue;
-    }
-    s += ch;
-  }
-  return s;
-}
-
 std::string type_descriptor_to_java(const std::string& descriptor) {
-  assert(!descriptor.empty());
+  redex_assert(!descriptor.empty());
   if (descriptor[0] == '[') {
     return type_descriptor_to_java(descriptor.substr(1)) + "[]";
   }
@@ -69,16 +55,16 @@ std::string type_descriptor_to_java(const std::string& descriptor) {
     return "void";
   }
   if (descriptor[0] == 'L') {
-    return redex::dexdump_name_to_dot_name(descriptor);
+    return java_names::internal_to_external(descriptor);
   }
   std::cerr << "type_descriptor_to_java: unexpected type descriptor "
             << descriptor << std::endl;
   exit(2);
 }
 
-std::string extract_member_name(std::string qualified) {
-  auto dot = qualified.find(".");
-  auto colon = qualified.find(":");
+std::string_view extract_member_name(const std::string_view qualified) {
+  auto dot = qualified.find('.');
+  auto colon = qualified.find(':');
   return qualified.substr(dot + 1, colon - dot - 1);
 }
 
@@ -88,13 +74,13 @@ std::string extract_member_name(std::string qualified) {
 // types, array types or class types. For example [[A; -> [[Lcom.wombat.Numbat;
 std::string deobfuscate_type_descriptor(const ProguardMap& pg_map,
                                         const std::string& desc) {
-  assert(!desc.empty());
+  redex_assert(!desc.empty());
   std::string deob;
   size_t i = 0;
   while (i < desc.size()) {
     if (desc[i] == 'L') {
-      auto colon = desc.find(";");
-      assert(colon != std::string::npos);
+      auto colon = desc.find(';');
+      redex_assert(colon != std::string::npos);
       auto class_type = desc.substr(i, colon + 1);
       auto deob_class = pg_map.deobfuscate_class(class_type);
       if (deob_class.empty()) {
@@ -112,15 +98,14 @@ std::string deobfuscate_type_descriptor(const ProguardMap& pg_map,
   return deob;
 }
 
-std::string form_java_args(const ProguardMap& pg_map,
-                           const std::deque<DexType*>& args) {
+std::string form_java_args(const ProguardMap& pg_map, const DexTypeList* args) {
   std::string s;
   unsigned long i = 0;
-  for (const auto& arg : args) {
+  for (const auto& arg : *args) {
     auto desc = arg->get_name()->c_str();
     auto deobfu_desc = deobfuscate_type_descriptor(pg_map, desc);
     s += type_descriptor_to_java(deobfu_desc);
-    if (i < args.size() - 1) {
+    if (i < args->size() - 1) {
       s += ",";
     }
     i++;
@@ -128,7 +113,7 @@ std::string form_java_args(const ProguardMap& pg_map,
   return s;
 }
 
-std::string java_args(const ProguardMap& pg_map, const std::deque<DexType*>& args) {
+std::string java_args(const ProguardMap& pg_map, const DexTypeList* args) {
   std::string str = "(";
   str += form_java_args(pg_map, args);
   str += ")";
@@ -139,15 +124,15 @@ void redex::print_method(std::ostream& output,
                          const ProguardMap& pg_map,
                          const std::string& class_name,
                          const DexMethod* method) {
-  std::string method_name = extract_member_name(method->get_name()->c_str());
+  std::string_view method_name = extract_member_name(method->get_name()->str());
   // Record if this is a constructor to supress return value printing
   // before the method name.
-  bool is_constructor = is_init(method);
+  bool is_constructor = method::is_init(method);
   if (is_constructor) {
     method_name = extract_suffix(class_name);
     is_constructor = true;
   } else {
-    auto deob = method->get_deobfuscated_name();
+    const auto deob = method->get_deobfuscated_name_or_empty();
     if (deob.empty()) {
       std::cerr << "WARNING: method has no deobfu: " << method_name
                 << std::endl;
@@ -156,7 +141,7 @@ void redex::print_method(std::ostream& output,
     }
   }
   auto proto = method->get_proto();
-  auto args = proto->get_args()->get_type_list();
+  auto* args = proto->get_args();
   auto return_type = proto->get_rtype();
   output << class_name << ": ";
   if (!is_constructor) {
@@ -182,12 +167,11 @@ void redex::print_field(std::ostream& output,
                         const ProguardMap& pg_map,
                         const std::string& class_name,
                         const DexField* field) {
-  auto field_name = field->get_deobfuscated_name();
   auto field_type = field->get_type()->get_name()->c_str();
   std::string deobfu_field_type =
       deobfuscate_type_descriptor(pg_map, field_type);
   output << class_name << ": " << type_descriptor_to_java(deobfu_field_type)
-         << " " << extract_member_name(field->get_deobfuscated_name())
+         << " " << extract_member_name(field->get_deobfuscated_name_or_empty())
          << std::endl;
 }
 
@@ -204,13 +188,16 @@ void redex::print_fields(std::ostream& output,
 void redex::print_class(std::ostream& output,
                         const ProguardMap& pg_map,
                         const DexClass* cls) {
-  auto deob = cls->get_deobfuscated_name();
-  if (deob.empty()) {
+  const auto& deob_name = [&]() {
+    const auto& deob = cls->get_deobfuscated_name_or_empty();
+    if (!deob.empty()) {
+      return deob;
+    }
     std::cerr << "WARNING: this class has no deobu name: "
               << cls->get_name()->c_str() << std::endl;
-    deob = cls->get_name()->c_str();
-  }
-  std::string name = redex::dexdump_name_to_dot_name(deob);
+    return cls->get_name()->str();
+  }();
+  std::string name = java_names::internal_to_external(deob_name);
   output << name << std::endl;
   print_fields(output, pg_map, name, cls->get_ifields());
   print_fields(output, pg_map, name, cls->get_sfields());

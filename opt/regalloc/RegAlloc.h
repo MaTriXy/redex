@@ -1,28 +1,51 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include <cstdio>
-
 #include "GraphColoring.h"
-#include "PassManager.h"
+#include "Pass.h"
+
+class DexMethod;
+
+namespace regalloc {
 
 class RegAllocPass : public Pass {
  public:
   RegAllocPass() : Pass("RegAllocPass") {}
-  virtual void configure_pass(const PassConfig& pc) override {
-    pc.get("live_range_splitting", false, m_allocator_config.use_splitting);
-    pc.get("use_spill_costs", false, m_allocator_config.use_spill_costs);
+
+  redex_properties::PropertyInteractions get_property_interactions()
+      const override {
+    using namespace redex_properties::interactions;
+    using namespace redex_properties::names;
+    return {
+        {DexLimitsObeyed, Preserves},
+        {NoInitClassInstructions, Preserves},
+        {NoResolvablePureRefs, Preserves},
+        {NoUnreachableInstructions, Preserves},
+        {RenameClass, Preserves},
+        {MethodRegister, Establishes},
+    };
   }
-  virtual void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
+
+  void bind_config() override {
+    bool unused;
+    bind("live_range_splitting", false, unused);
+    trait(Traits::Pass::atleast, 1);
+  }
+
+  void eval_pass(DexStoresVector& stores,
+                 ConfigFiles& conf,
+                 PassManager& mgr) override;
+  void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
  private:
-  regalloc::graph_coloring::Allocator::Config m_allocator_config;
+  size_t m_run{0}; // Which iteration of `run_pass`.
+  size_t m_eval{0}; // How many `eval_pass` iterations.
 };
+
+} // namespace regalloc

@@ -1,19 +1,21 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "ClassHierarchy.h"
 
 #include "DexUtil.h"
-#include "Timer.h"
+#include "RedexContext.h"
 #include "Resolver.h"
+#include "Show.h"
+#include "Timer.h"
 
 namespace {
+
+static const TypeSet empty_set{};
 
 inline bool match(const DexString* name,
                   const DexProto* proto,
@@ -52,17 +54,16 @@ void build_class_hierarchy(ClassHierarchy& hierarchy, const DexClass* cls) {
   if (super != nullptr) {
     hierarchy[super].insert(type);
   } else {
-    always_assert_log(cls->get_type() == get_object_type(),
+    always_assert_log(cls->get_type() == type::java_lang_Object(), "%s",
                       SHOW(cls->get_type()));
   }
 }
 
 void build_external_hierarchy(ClassHierarchy& hierarchy) {
-  g_redex->walk_type_class(
-      [&](const DexType* type, const DexClass* cls) {
-        if (!cls->is_external() || is_interface(cls)) return;
-        build_class_hierarchy(hierarchy, cls);
-      });
+  g_redex->walk_type_class([&](const DexType* type, const DexClass* cls) {
+    if (!cls->is_external() || is_interface(cls)) return;
+    build_class_hierarchy(hierarchy, cls);
+  });
 }
 
 // Find all the interfaces that extend 'intf'
@@ -73,8 +74,7 @@ bool gather_intf_extenders(const DexType* extender,
   const DexClass* extender_cls = type_class(extender);
   if (!extender_cls) return extends;
   if (is_interface(extender_cls)) {
-    for (const auto& extends_intf :
-         extender_cls->get_interfaces()->get_type_list()) {
+    for (const auto& extends_intf : *extender_cls->get_interfaces()) {
       if (extends_intf == intf ||
           gather_intf_extenders(extends_intf, intf, intf_extenders)) {
         intf_extenders.insert(extender);
@@ -97,7 +97,7 @@ void build_interface_map(InterfaceMap& interfaces,
                          const ClassHierarchy& hierarchy,
                          const DexClass* current,
                          const TypeSet& implementors) {
-  for (const auto& intf : current->get_interfaces()->get_type_list()) {
+  for (const auto& intf : *current->get_interfaces()) {
     interfaces[intf].insert(implementors.begin(), implementors.end());
     const auto intf_cls = type_class(intf);
     if (intf_cls == nullptr) continue;
@@ -105,15 +105,20 @@ void build_interface_map(InterfaceMap& interfaces,
   }
 }
 
-}
+} // namespace
 
-ClassHierarchy build_type_hierarchy(const Scope& scope) {
+ClassHierarchy build_internal_type_hierarchy(const Scope& scope) {
   ClassHierarchy hierarchy;
   // build the type hierarchy
   for (const auto& cls : scope) {
     if (is_interface(cls)) continue;
     build_class_hierarchy(hierarchy, cls);
   }
+  return hierarchy;
+}
+
+ClassHierarchy build_type_hierarchy(const Scope& scope) {
+  auto hierarchy = build_internal_type_hierarchy(scope);
   build_external_hierarchy(hierarchy);
   return hierarchy;
 }
@@ -133,15 +138,26 @@ InterfaceMap build_interface_map(const ClassHierarchy& hierarchy) {
   return interfaces;
 }
 
-void get_all_children(
-    const ClassHierarchy& hierarchy,
-    const DexType* type,
-    TypeSet& children) {
+const TypeSet& get_children(const ClassHierarchy& hierarchy,
+                            const DexType* type) {
+  const auto& it = hierarchy.find(type);
+  return it != hierarchy.end() ? it->second : empty_set;
+}
+
+void get_all_children(const ClassHierarchy& hierarchy,
+                      const DexType* type,
+                      TypeSet& children) {
   const auto& direct = get_children(hierarchy, type);
   for (const auto& child : direct) {
     children.insert(child);
     get_all_children(hierarchy, child, children);
   }
+}
+
+TypeSet get_all_children(const ClassHierarchy& hierarchy, const DexType* type) {
+  TypeSet children;
+  get_all_children(hierarchy, type, children);
+  return children;
 }
 
 void get_all_implementors(const Scope& scope,
@@ -158,7 +174,7 @@ void get_all_implementors(const Scope& scope,
     auto cur = cls;
     bool found = false;
     while (!found && cur != nullptr) {
-      for (auto impl : cur->get_interfaces()->get_type_list()) {
+      for (auto impl : *cur->get_interfaces()) {
         if (intfs.count(impl) > 0) {
           impls.insert(cls->get_type());
           found = true;

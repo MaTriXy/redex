@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "PointsToSemantics.h"
@@ -12,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -28,21 +27,26 @@
 #include <boost/functional/hash_fwd.hpp>
 #include <boost/optional.hpp>
 
+#include <sparta/PatriciaTreeMapAbstractEnvironment.h>
+#include <sparta/PatriciaTreeSetAbstractDomain.h>
+
+#include "BaseIRAnalyzer.h"
 #include "ControlFlow.h"
 #include "Debug.h"
 #include "DexAccess.h"
 #include "DexClass.h"
 #include "DexUtil.h"
-#include "FixpointIterators.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "IROpcode.h"
-#include "PatriciaTreeMapAbstractEnvironment.h"
-#include "PatriciaTreeSetAbstractDomain.h"
+#include "Macros.h"
 #include "PointsToSemanticsUtils.h"
 #include "RedexContext.h"
+#include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
+
+using namespace sparta;
 
 s_expr PointsToVariable::to_s_expr() const {
   return s_expr({s_expr("V"), s_expr(m_id)});
@@ -83,6 +87,8 @@ std::ostream& operator<<(std::ostream& o, const PointsToVariable& v) {
 
 namespace pts_impl {
 
+/* clang-format off */
+
 #define OP_STRING_TABLE                 \
   {                                     \
     OP_STRING(PTS_CONST_STRING),        \
@@ -116,6 +122,8 @@ std::unordered_map<PointsToOperationKind, std::string, std::hash<int>>
 std::unordered_map<std::string, PointsToOperationKind> string_to_op_table =
     OP_STRING_TABLE;
 #undef OP_STRING
+
+/* clang-format on */
 
 s_expr op_kind_to_s_expr(PointsToOperationKind kind) {
   auto it = op_to_string_table.find(kind);
@@ -151,7 +159,7 @@ boost::optional<SpecialPointsToEdge> string_to_special_edge(
 s_expr dex_method_to_s_expr(DexMethodRef* dex_method) {
   DexProto* proto = dex_method->get_proto();
   std::vector<s_expr> signature;
-  for (DexType* arg : proto->get_args()->get_type_list()) {
+  for (DexType* arg : *proto->get_args()) {
     signature.push_back(s_expr(arg->get_name()->str()));
   }
   return s_expr({s_expr(dex_method->get_class()->get_name()->str()),
@@ -165,24 +173,22 @@ boost::optional<DexMethodRef*> s_expr_to_dex_method(const s_expr& e) {
   std::string name_str;
   std::string rtype_str;
   s_expr signature;
-  if (!s_patn({s_patn(&type_str),
-               s_patn(&name_str),
-               s_patn(&rtype_str),
+  if (!s_patn({s_patn(&type_str), s_patn(&name_str), s_patn(&rtype_str),
                s_patn({}, signature)})
            .match_with(e)) {
     return {};
   }
-  std::deque<DexType*> types;
+  DexTypeList::ContainerType types;
   for (size_t arg = 0; arg < signature.size(); ++arg) {
     if (!signature[arg].is_string()) {
       return {};
     }
-    types.push_back(DexType::make_type(signature[arg].get_string().c_str()));
+    types.push_back(DexType::make_type(signature[arg].get_string()));
   }
   return {DexMethod::make_method(
-      DexType::make_type(type_str.c_str()),
+      DexType::make_type(type_str),
       DexString::make_string(name_str),
-      DexProto::make_proto(DexType::make_type(rtype_str.c_str()),
+      DexProto::make_proto(DexType::make_type(rtype_str),
                            DexTypeList::make_type_list(std::move(types))))};
 }
 
@@ -262,8 +268,7 @@ boost::optional<PointsToOperation> PointsToOperation::from_s_expr(
     if (!s_patn({s_patn(&dex_type_str)}).match_with(args)) {
       return {};
     }
-    return {
-        PointsToOperation(op_kind, DexType::make_type(dex_type_str.c_str()))};
+    return {PointsToOperation(op_kind, DexType::make_type(dex_type_str))};
   }
   case PTS_GET_EXCEPTION:
   case PTS_GET_CLASS:
@@ -291,9 +296,9 @@ boost::optional<PointsToOperation> PointsToOperation::from_s_expr(
     }
     return {PointsToOperation(
         op_kind,
-        DexField::make_field(DexType::make_type(container_str.c_str()),
+        DexField::make_field(DexType::make_type(container_str),
                              DexString::make_string(name_str),
-                             DexType::make_type(type_str.c_str())))};
+                             DexType::make_type(type_str)))};
   }
   case PTS_IGET_SPECIAL:
   case PTS_IPUT_SPECIAL: {
@@ -534,7 +539,7 @@ std::ostream& operator<<(std::ostream& o, const PointsToAction& a) {
   const PointsToOperation& op = a.operation();
   switch (op.kind) {
   case PTS_CONST_STRING: {
-    o << a.dest() << " = " << std::quoted(op.dex_string->str());
+    o << a.dest() << " = " << std::quoted(op.dex_string->str_copy());
     break;
   }
   case PTS_CONST_CLASS: {
@@ -620,7 +625,9 @@ std::ostream& operator<<(std::ostream& o, const PointsToAction& a) {
         o << "I";
         break;
       }
-      default: { always_assert(false); }
+      default: {
+        not_reached();
+      }
       }
       o << "}";
     }
@@ -723,49 +730,27 @@ namespace pts_impl {
 
 using namespace std::placeholders;
 
-using register_t = uint32_t;
-
-// We use this special register to denote the result of a method invocation or a
-// filled-array creation.
-register_t RESULT_REGISTER = std::numeric_limits<register_t>::max();
+using namespace ir_analyzer;
 
 // We represent an anchor by a pointer to the corresponding instruction. An
 // empty anchor set is semantically equivalent to the `null` reference.
-using AnchorDomain = PatriciaTreeSetAbstractDomain<IRInstruction*>;
+using AnchorDomain = PatriciaTreeSetAbstractDomain<const IRInstruction*>;
 
 using AnchorEnvironment =
-    PatriciaTreeMapAbstractEnvironment<register_t, AnchorDomain>;
+    PatriciaTreeMapAbstractEnvironment<reg_t, AnchorDomain>;
 
-class AnchorPropagation final
-    : public MonotonicFixpointIterator<cfg::GraphInterface, AnchorEnvironment> {
+class AnchorPropagation final : public BaseIRAnalyzer<AnchorEnvironment> {
  public:
-  using NodeId = cfg::Block*;
-
   AnchorPropagation(const cfg::ControlFlowGraph& cfg,
                     bool is_static_method,
                     IRCode* code)
-      : MonotonicFixpointIterator(cfg, cfg.blocks().size()),
+      : BaseIRAnalyzer(cfg),
         m_is_static_method(is_static_method),
         m_code(code),
         m_this_anchor(nullptr) {}
 
-  void analyze_node(const NodeId& node,
-                    AnchorEnvironment* current_state) const override {
-    for (const MethodItemEntry& mie : *node) {
-      if (mie.type == MFLOW_OPCODE) {
-        analyze_instruction(mie.insn, current_state);
-      }
-    }
-  }
-
-  AnchorEnvironment analyze_edge(
-      const EdgeId&,
-      const AnchorEnvironment& exit_state_at_source) const override {
-    return exit_state_at_source;
-  }
-
-  void analyze_instruction(IRInstruction* insn,
-                           AnchorEnvironment* current_state) const {
+  void analyze_instruction(const IRInstruction* insn,
+                           AnchorEnvironment* current_state) const override {
     switch (insn->opcode()) {
     case IOPCODE_LOAD_PARAM_OBJECT: {
       // There's nothing to do, since this instruction has been taken care of
@@ -792,8 +777,8 @@ class AnchorPropagation final
       current_state->set(insn->dest(), current_state->get(insn->src(0)));
       break;
     }
-    case IOPCODE_MOVE_RESULT_PSEUDO_OBJECT: {
-    case OPCODE_MOVE_RESULT_OBJECT:
+    case IOPCODE_MOVE_RESULT_PSEUDO_OBJECT:
+    case OPCODE_MOVE_RESULT_OBJECT: {
       current_state->set(insn->dest(), current_state->get(RESULT_REGISTER));
       break;
     }
@@ -803,7 +788,7 @@ class AnchorPropagation final
     case OPCODE_INVOKE_DIRECT:
     case OPCODE_INVOKE_INTERFACE: {
       DexMethodRef* dex_method = insn->get_method();
-      if (is_object(dex_method->get_proto()->get_rtype())) {
+      if (type::is_object(dex_method->get_proto()->get_rtype())) {
         // We attach an anchor to a method invocation only if the method returns
         // an object.
         current_state->set(RESULT_REGISTER, AnchorDomain(insn));
@@ -814,7 +799,7 @@ class AnchorPropagation final
       // Since registers can be reused in different contexts, we need to
       // invalidate the corresponding anchor sets. Note that this case also
       // encompasses the initialization to null, like `const v1, 0`.
-      if (insn->dests_size() > 0) {
+      if (insn->has_dest()) {
         current_state->set(insn->dest(), AnchorDomain());
         if (insn->dest_is_wide()) {
           current_state->set(insn->dest() + 1, AnchorDomain());
@@ -829,7 +814,7 @@ class AnchorPropagation final
 
   void run() { MonotonicFixpointIterator::run(initial_environment()); }
 
-  bool is_this_anchor(IRInstruction* insn) const {
+  bool is_this_anchor(const IRInstruction* insn) const {
     return insn == m_this_anchor;
   }
 
@@ -866,7 +851,7 @@ class AnchorPropagation final
         break;
       }
       default: {
-        always_assert_log(false, "Unexpected instruction '%s'\n", SHOW(insn));
+        not_reached_log("Unexpected instruction '%s'\n", SHOW(insn));
       }
       }
       first_param = false;
@@ -894,7 +879,7 @@ class PointsToActionGenerator final {
   void run() {
     IRCode* code = m_dex_method->get_code();
     always_assert(code != nullptr);
-    code->build_cfg();
+    code->build_cfg(/* editable */ false);
     cfg::ControlFlowGraph& cfg = code->cfg();
     cfg.calculate_exit_block();
 
@@ -910,37 +895,32 @@ class PointsToActionGenerator final {
     // the entry block. We need to process them first.
     size_t param_cursor = 0;
     bool first_param = true;
-    for (const MethodItemEntry& mie : *cfg.entry_block()) {
-      if (mie.type == MFLOW_OPCODE) {
-        IRInstruction* insn = mie.insn;
-        switch (insn->opcode()) {
-        case IOPCODE_LOAD_PARAM_OBJECT: {
-          if (first_param && !is_static(m_dex_method)) {
-            // If the method is not static, the first parameter corresponds to
-            // `this`, which is represented using a special points-to variable.
-          } else {
-            m_semantics->add(PointsToAction::load_operation(
-                PointsToOperation(PTS_LOAD_PARAM, param_cursor++),
-                get_variable_from_anchor(insn)));
-          }
-          break;
+    for (const MethodItemEntry& mie :
+         InstructionIterable(cfg.get_param_instructions())) {
+      IRInstruction* insn = mie.insn;
+      switch (insn->opcode()) {
+      case IOPCODE_LOAD_PARAM_OBJECT: {
+        if (first_param && !is_static(m_dex_method)) {
+          // If the method is not static, the first parameter corresponds to
+          // `this`, which is represented using a special points-to variable.
+        } else {
+          m_semantics->add(PointsToAction::load_operation(
+              PointsToOperation(PTS_LOAD_PARAM, param_cursor++),
+              get_variable_from_anchor(insn)));
         }
-        case IOPCODE_LOAD_PARAM:
-        case IOPCODE_LOAD_PARAM_WIDE: {
-          ++param_cursor;
-          break;
-        }
-        default: {
-          // We've reached the end of the LOAD_PARAM_* instruction block and we
-          // simply exit the loop. Note that premature loop exit is probably the
-          // only legitimate use of goto in C++ code.
-          goto done;
-        }
-        }
-        first_param = false;
+        break;
       }
+      case IOPCODE_LOAD_PARAM:
+      case IOPCODE_LOAD_PARAM_WIDE: {
+        ++param_cursor;
+        break;
+      }
+      default:
+        not_reached();
+      }
+      first_param = false;
     }
-  done:
+
     // We go over each IR instruction and generate the corresponding points-to
     // actions.
     for (cfg::Block* block : cfg.blocks()) {
@@ -991,9 +971,11 @@ class PointsToActionGenerator final {
     case OPCODE_INVOKE_SUPER:
     case OPCODE_INVOKE_DIRECT:
     case OPCODE_INVOKE_INTERFACE: {
-      return is_object(insn->get_method()->get_proto()->get_rtype());
+      return type::is_object(insn->get_method()->get_proto()->get_rtype());
     }
-    default: { return false; }
+    default: {
+      return false;
+    }
     }
   }
 
@@ -1031,7 +1013,7 @@ class PointsToActionGenerator final {
     }
     case OPCODE_NEW_INSTANCE: {
       DexType* dex_type = insn->get_type();
-      if (m_type_system.is_subtype(m_utils.get_throwable_type(), dex_type)) {
+      if (m_type_system.is_subtype(type::java_lang_Throwable(), dex_type)) {
         // If the object created is an exception (i.e., its type inherits from
         // java.lang.Throwable), we use PTS_GET_EXCEPTION. In our semantic
         // model, the exact identity of an exception is abstracted away for
@@ -1045,14 +1027,16 @@ class PointsToActionGenerator final {
       }
       // Otherwise, we fall through to the generic case.
     }
+      FALLTHROUGH_INTENDED;
     case OPCODE_NEW_ARRAY:
     case OPCODE_FILLED_NEW_ARRAY: {
       m_semantics->add(PointsToAction::load_operation(
           PointsToOperation(PTS_NEW_OBJECT, insn->get_type()),
           get_variable_from_anchor(insn)));
       if (insn->opcode() == OPCODE_FILLED_NEW_ARRAY) {
-        const DexType* element_type = get_array_type(insn->get_type());
-        if (!is_object(element_type)) {
+        const DexType* element_type =
+            type::get_array_element_type(insn->get_type());
+        if (!type::is_object(element_type)) {
           break;
         }
         auto lhs =
@@ -1163,13 +1147,13 @@ class PointsToActionGenerator final {
                                   const AnchorEnvironment& state) {
     DexMethodRef* dex_method = insn->get_method();
     DexProto* proto = dex_method->get_proto();
-    const auto& signature = proto->get_args()->get_type_list();
+    const auto* signature = proto->get_args();
     std::vector<std::pair<int32_t, PointsToVariable>> args;
     size_t src_idx{0};
 
     // Allocate a variable for the returned object if any.
     boost::optional<PointsToVariable> dest;
-    if (is_object(insn->get_method()->get_proto()->get_rtype())) {
+    if (type::is_object(insn->get_method()->get_proto()->get_rtype())) {
       dest = {get_variable_from_anchor(insn)};
     }
 
@@ -1184,11 +1168,10 @@ class PointsToActionGenerator final {
 
     // Process the arguments of the method invocation.
     int32_t arg_pos = 0;
-    for (DexType* dex_type : signature) {
-      if (is_object(dex_type)) {
-        args.push_back(
-            {arg_pos,
-             get_variable_from_anchor_set(state.get(insn->src(src_idx++)))});
+    for (DexType* dex_type : *signature) {
+      if (type::is_object(dex_type)) {
+        args.push_back({arg_pos, get_variable_from_anchor_set(
+                                     state.get(insn->src(src_idx++)))});
       } else {
         // We skip this argument.
         ++src_idx;
@@ -1221,7 +1204,7 @@ class PointsToActionGenerator final {
     }
     default: {
       // This function is only called on invoke instructions.
-      always_assert(false);
+      not_reached();
     }
     }
 
@@ -1232,7 +1215,7 @@ class PointsToActionGenerator final {
         args));
   }
 
-  PointsToVariable get_variable_from_anchor(IRInstruction* insn) {
+  PointsToVariable get_variable_from_anchor(const IRInstruction* insn) {
     if (m_analysis->is_this_anchor(insn)) {
       return PointsToVariable::this_variable();
     }
@@ -1248,11 +1231,11 @@ class PointsToActionGenerator final {
     always_assert(!s.is_top());
     if (s.is_bottom()) {
       // This means that some code in the method is unreachable.
-      TRACE(PTA, 2, "Unreachable code in %s\n", SHOW(m_dex_method));
+      TRACE(PTA, 2, "Unreachable code in %s", SHOW(m_dex_method));
       return PointsToVariable();
     }
     auto anchors = s.elements();
-    if (anchors.size() == 0) {
+    if (anchors.empty()) {
       // The denotation of the anchor set is just the `null` reference. This is
       // represented by a special points-to variable.
       return PointsToVariable::null_variable();
@@ -1264,7 +1247,7 @@ class PointsToActionGenerator final {
     }
     // Otherwise, we need a disjunction.
     PointsToVariableSet ptv_set;
-    for (IRInstruction* insn : anchors) {
+    for (const IRInstruction* insn : anchors) {
       ptv_set.insert(get_variable_from_anchor(insn));
     }
     auto it = m_anchor_sets.find(ptv_set);
@@ -1288,7 +1271,7 @@ class PointsToActionGenerator final {
   std::unique_ptr<AnchorPropagation> m_analysis;
   // We assign each anchor a points-to variable. This map keeps track of the
   // naming.
-  std::unordered_map<IRInstruction*, PointsToVariable> m_anchors;
+  std::unordered_map<const IRInstruction*, PointsToVariable> m_anchors;
   // A table that keeps track of all disjunctions already created, so that we
   // only generate one disjuction per anchor set.
   std::unordered_map<PointsToVariableSet,
@@ -1443,6 +1426,8 @@ class Shrinker final {
   VariableSet m_vars_to_keep;
 };
 
+/* clang-format off */
+
 #define KIND_STRING_TABLE         \
   {                               \
     KIND_STRING(PTS_APK),         \
@@ -1460,6 +1445,8 @@ std::unordered_map<MethodKind, std::string, std::hash<int>>
 std::unordered_map<std::string, MethodKind> string_to_method_kind_table =
     KIND_STRING_TABLE;
 #undef KIND_STRING
+
+/* clang-format on */
 
 s_expr method_kind_to_s_expr(MethodKind kind) {
   auto it = method_kind_to_string_table.find(kind);
@@ -1497,10 +1484,9 @@ s_expr PointsToMethodSemantics::to_s_expr() const {
                  m_points_to_actions.end(),
                  std::back_inserter(actions),
                  [](const PointsToAction& a) { return a.to_s_expr(); });
-  return s_expr({dex_method_to_s_expr(m_dex_method),
-                 method_kind_to_s_expr(m_kind),
-                 s_expr(static_cast<int32_t>(m_variable_counter)),
-                 s_expr(actions)});
+  return s_expr(
+      {dex_method_to_s_expr(m_dex_method), method_kind_to_s_expr(m_kind),
+       s_expr(static_cast<int32_t>(m_variable_counter)), s_expr(actions)});
 }
 
 boost::optional<PointsToMethodSemantics> PointsToMethodSemantics::from_s_expr(
@@ -1510,9 +1496,7 @@ boost::optional<PointsToMethodSemantics> PointsToMethodSemantics::from_s_expr(
   std::string kind_str;
   int32_t var_counter;
   s_expr actions_expr;
-  if (!s_patn({s_patn(dex_method_expr),
-               s_patn(&kind_str),
-               s_patn(&var_counter),
+  if (!s_patn({s_patn(dex_method_expr), s_patn(&kind_str), s_patn(&var_counter),
                s_patn({}, actions_expr)})
            .match_with(e)) {
     return {};
@@ -1611,7 +1595,7 @@ void PointsToSemantics::load_stubs(const std::string& file_name) {
     if (it == m_method_semantics.end()) {
       m_method_semantics.emplace(dex_method, *semantics_opt);
     } else {
-      TRACE(PTA, 2, "Collision with stub for method %s\n", SHOW(dex_method));
+      TRACE(PTA, 2, "Collision with stub for method %s", SHOW(dex_method));
     }
   }
 }
@@ -1635,14 +1619,11 @@ void PointsToSemantics::initialize_entry(DexMethod* dex_method) {
   if (dex_method->get_code() == nullptr) {
     if ((access_flags & DexAccessFlags::ACC_ABSTRACT)) {
       kind = PTS_ABSTRACT;
-    } else if ((access_flags & DexAccessFlags::ACC_NATIVE)) {
-      kind = PTS_NATIVE;
     } else {
       // The definition of a method that is neither abstract nor native should
       // always have an associated IRCode component.
-      always_assert_log(false,
-                        "Method %s has no associated code component",
-                        SHOW(dex_method->get_name()));
+      redex_assert(access_flags & DexAccessFlags::ACC_NATIVE);
+      kind = PTS_NATIVE;
     }
   } else {
     kind = default_method_kind();

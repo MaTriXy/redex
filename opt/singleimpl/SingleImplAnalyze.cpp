@@ -1,36 +1,34 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
-#include <stdio.h>
 #include <memory>
 #include <string>
-#include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
-#include "SingleImplDefs.h"
-#include "SingleImpl.h"
-#include "SingleImplUtil.h"
 #include "Debug.h"
-#include "DexLoader.h"
 #include "DexOutput.h"
 #include "DexStore.h"
 #include "DexUtil.h"
 #include "ReachableClasses.h"
 #include "Resolver.h"
+#include "Show.h"
+#include "SingleImpl.h"
+#include "SingleImplDefs.h"
+#include "StlUtil.h"
 #include "Trace.h"
 #include "Walkers.h"
 
 struct AnalysisImpl : SingleImplAnalysis {
-  AnalysisImpl(const Scope& scope, const DexStoresVector& stores)
-      : SingleImplAnalysis(), scope(scope), xstores(stores) {
-  }
+  AnalysisImpl(const Scope& scope,
+               const ProguardMap& pg_map,
+               const DexStoresVector& stores)
+      : scope(scope), pg_map(pg_map), xstores(stores) {}
 
   void create_single_impl(const TypeMap& single_impl,
                           const TypeSet& intfs,
@@ -48,11 +46,13 @@ struct AnalysisImpl : SingleImplAnalysis {
   void escape_with_clinit();
   void escape_with_sfields();
   void filter_single_impl(const SingleImplConfig& config);
+  void filter_proguard_special_interface();
   void filter_do_not_strip();
   void filter_list(const std::vector<std::string>& list, bool keep_match);
+  void filter_by_annotations(const std::vector<std::string>& blocklist);
 
- private:
   const Scope& scope;
+  const ProguardMap& pg_map;
   XStoreRefs xstores;
 };
 
@@ -62,11 +62,13 @@ struct AnalysisImpl : SingleImplAnalysis {
  * Return nullptr otherwise.
  */
 DexType* AnalysisImpl::get_and_check_single_impl(DexType* type) {
-  if (exists(single_impls, type)) return type;
-  if (is_array(type)) {
-    auto array_type = get_array_type(type);
-    assert(array_type);
-    const auto sit = single_impls.find(array_type);
+  if (single_impls.count(type)) {
+    return type;
+  }
+  if (type::is_array(type)) {
+    auto element_type = type::get_array_element_type(type);
+    redex_assert(element_type);
+    const auto sit = single_impls.find(element_type);
     if (sit != single_impls.end()) {
       escape_interface(sit->first, HAS_ARRAY_TYPE);
       return sit->first;
@@ -81,7 +83,7 @@ DexType* AnalysisImpl::get_and_check_single_impl(DexType* type) {
 void AnalysisImpl::create_single_impl(const TypeMap& single_impl,
                                       const TypeSet& intfs,
                                       const SingleImplConfig& config) {
-  for (const auto intf_it : single_impl) {
+  for (auto const& intf_it : single_impl) {
     auto intf = intf_it.first;
     auto intf_cls = type_class(intf);
     always_assert(intf_cls && !intf_cls->is_external());
@@ -103,29 +105,57 @@ void AnalysisImpl::create_single_impl(const TypeMap& single_impl,
 /**
  * Filter common function for both white and black list.
  */
-void AnalysisImpl::filter_list(
-  const std::vector<std::string>& list,
-  bool keep_match
-) {
+void AnalysisImpl::filter_list(const std::vector<std::string>& list,
+                               bool keep_match) {
   if (list.empty()) return;
 
-  auto find_in_list = [&](const std::string& name) {
+  auto find_in_list = [&](const std::string_view name) {
     for (const std::string& el_name : list) {
-      if (name == el_name) {
+      if (name.compare(0, el_name.size(), el_name) == 0) {
         return true;
       }
     }
     return false;
   };
 
-  for (const auto intf_it : single_impls) {
+  for (const auto& intf_it : single_impls) {
     const auto intf = intf_it.first;
     const auto intf_cls = type_class(intf);
-    const std::string& intf_name = intf_cls->get_deobfuscated_name();
+    const auto intf_name = intf_cls->get_deobfuscated_name_or_empty();
     bool match = find_in_list(intf_name);
     if (match && keep_match) continue;
     if (!match && !keep_match) continue;
     escape_interface(intf, FILTERED);
+  }
+}
+
+void AnalysisImpl::filter_proguard_special_interface() {
+  for (const auto& intf_it : single_impls) {
+    const auto intf = intf_it.first;
+    const auto intf_cls = type_class(intf);
+    std::string intf_name = intf_cls->get_deobfuscated_name_or_empty_copy();
+    if (pg_map.is_special_interface(intf_name)) {
+      escape_interface(intf, FILTERED);
+    }
+  }
+}
+
+void AnalysisImpl::filter_by_annotations(
+    const std::vector<std::string>& blocklist) {
+  std::unordered_set<DexType*> anno_types;
+  for (const auto& s : blocklist) {
+    auto ty = DexType::get_type(s);
+    if (ty != nullptr) {
+      anno_types.emplace(ty);
+    }
+  }
+
+  for (const auto& intf_it : single_impls) {
+    const auto intf = intf_it.first;
+    const auto intf_cls = type_class(intf);
+    if (has_anno(intf_cls, anno_types)) {
+      escape_interface(intf, FILTERED);
+    }
   }
 }
 
@@ -134,21 +164,48 @@ void AnalysisImpl::filter_list(
  * White lists come first, then black lists.
  */
 void AnalysisImpl::filter_single_impl(const SingleImplConfig& config) {
-  filter_list(config.white_list, true);
-  filter_list(config.package_white_list, true);
-  filter_list(config.black_list, false);
-  filter_list(config.package_black_list, false);
+  filter_list(config.allowlist, true);
+  filter_list(config.package_allowlist, true);
+  filter_list(config.blocklist, false);
+  filter_list(config.package_blocklist, false);
+  filter_by_annotations(config.anno_blocklist);
+  // TODO(T33109158): Better way to eliminate VerifyError.
+  if (config.filter_proguard_special_interfaces) {
+    filter_proguard_special_interface();
+  }
 }
 
 /**
  * Do not optimize DoNotStrip interfaces.
  */
 void AnalysisImpl::filter_do_not_strip() {
-  for (const auto intf_it : single_impls) {
+  for (const auto& intf_it : single_impls) {
     if (!can_delete(type_class(intf_it.first))) {
       escape_interface(intf_it.first, DO_NOT_STRIP);
     }
   }
+  walk::methods(scope, [this](DexMethod* method) {
+    if (root(method)) {
+      for (auto arg_type : *method->get_proto()->get_args()) {
+        if (single_impls.count(arg_type)) {
+          escape_interface(arg_type, DO_NOT_STRIP);
+        }
+      }
+      if (single_impls.count(method->get_class())) {
+        escape_interface(method->get_class(), DO_NOT_STRIP);
+      }
+    }
+  });
+  walk::fields(scope, [this](DexField* field) {
+    if (root(field)) {
+      if (single_impls.count(field->get_type())) {
+        escape_interface(field->get_type(), DO_NOT_STRIP);
+      }
+      if (single_impls.count(field->get_class())) {
+        escape_interface(field->get_class(), DO_NOT_STRIP);
+      }
+    }
+  });
 }
 
 /**
@@ -156,8 +213,7 @@ void AnalysisImpl::filter_do_not_strip() {
  */
 void AnalysisImpl::collect_children(const TypeSet& intfs) {
   for (auto& intf : intfs) {
-    auto supers = type_class(intf)->get_interfaces();
-    for (auto super : supers->get_type_list()) {
+    for (auto super : *type_class(intf)->get_interfaces()) {
       auto super_it = single_impls.find(super);
       if (super_it != single_impls.end()) {
         super_it->second.children.insert(intf);
@@ -171,7 +227,7 @@ void AnalysisImpl::collect_children(const TypeSet& intfs) {
  */
 void AnalysisImpl::check_impl_hierarchy() {
   for (auto& intf_it : single_impls) {
-    if (!has_hierarchy_in_scope(type_class(intf_it.second.cls))) {
+    if (!klass::has_hierarchy_in_scope(type_class(intf_it.second.cls))) {
       escape_interface(intf_it.first, IMPL_PARENT_ESCAPED);
     }
   }
@@ -186,7 +242,7 @@ void AnalysisImpl::escape_with_clinit() {
     // same. Interfaces should not have static methods and even if so we
     // just escape them. From our analysis it turns out there are few with
     // clinit only and as expected none with static methods.
-    if (type_class(intf_it.first)->get_dmethods().size() > 0) {
+    if (!type_class(intf_it.first)->get_dmethods().empty()) {
       escape_interface(intf_it.first, CLINIT);
     }
   }
@@ -203,10 +259,10 @@ void AnalysisImpl::escape_with_clinit() {
 void AnalysisImpl::escape_with_sfields() {
   for (auto const& intf_it : single_impls) {
     auto intf_cls = type_class(intf_it.first);
-    assert(intf_cls->get_ifields().size() == 0);
+    redex_assert(CONSTP(intf_cls)->get_ifields().empty());
     always_assert(!intf_cls->is_external());
     const auto& sfields = intf_cls->get_sfields();
-    if (sfields.size() == 0) continue;
+    if (sfields.empty()) continue;
     escape_interface(intf_it.first, HAS_SFIELDS);
     for (auto sfield : sfields) {
       auto ftype = sfield->get_class();
@@ -224,13 +280,30 @@ void AnalysisImpl::escape_with_sfields() {
  */
 void AnalysisImpl::escape_cross_stores() {
   for (auto const& intf_it : single_impls) {
-    // REVIEW: not sure how accurate this is. I mean it is the right check
-    //         if the code was written correctly, that is, if the interface
-    //         itself is not creating a bad cross reference already.
-    //         Good enough for now and possible forever
-    //         (in which case remove this comment)
     if (xstores.illegal_ref(intf_it.first, intf_it.second.cls)) {
       escape_interface(intf_it.first, CROSS_STORES);
+      continue;
+    }
+    // Be conservative: it is possible that the class has cross-store
+    // references itself. Replacing the interface might increase the
+    // chances of that blowing up.
+    auto cls = type_class(intf_it.second.cls);
+    if (cls != nullptr) {
+      if (xstores.illegal_ref_load_types(intf_it.first, cls)) {
+        escape_interface(intf_it.first, CROSS_STORES);
+        static bool warned = false;
+        if (!warned) {
+          warned = true;
+          TRACE(INTF, 0,
+                "Found transitive cross store violation! For details, run with "
+                "TRACE=INTF:1.");
+        }
+        TRACE(INTF, 1,
+              "Warning: found %s which is by itself not a cross-store "
+              "violation for %s but depends on other types that are!",
+              SHOW(cls), SHOW(intf_it.first));
+        continue;
+      }
     }
   }
 }
@@ -239,28 +312,20 @@ void AnalysisImpl::escape_cross_stores() {
  * Clean up the single impl map.
  */
 void AnalysisImpl::remove_escaped() {
-  auto it = single_impls.begin();
-  while (it != single_impls.end()) {
-    if (it->second.is_escaped()) {
-      it = single_impls.erase(it);
-    } else {
-      ++it;
-    }
-  }
+  std20::erase_if(single_impls, [](auto& p) { return p.second.is_escaped(); });
 }
 
 /**
  * Find all fields typed with the single impl interface.
  */
 void AnalysisImpl::collect_field_defs() {
-  walk::fields(scope,
-              [&](DexField* field) {
-                auto type = field->get_type();
-                auto intf = get_and_check_single_impl(type);
-                if (intf) {
-                  single_impls[intf].fielddefs.push_back(field);
-                }
-              });
+  walk::fields(scope, [&](DexField* field) {
+    auto type = field->get_type();
+    auto intf = get_and_check_single_impl(type);
+    if (intf) {
+      single_impls[intf].fielddefs.push_back(field);
+    }
+  });
 }
 
 /**
@@ -276,22 +341,17 @@ void AnalysisImpl::collect_method_defs() {
     if (native) {
       escape_interface(intf, NATIVE_METHOD);
     }
-    if (method->get_class() == intf) {
-      escape_interface(intf, SELF_REFERENCE);
-    }
     single_impls[intf].methoddefs.insert(method);
   };
 
-  walk::methods(scope,
-    [&](DexMethod* method) {
-      auto proto = method->get_proto();
-      bool native = is_native(method);
-      check_method_arg(proto->get_rtype(), method, native);
-      auto args = proto->get_args();
-      for (const auto it : args->get_type_list()) {
-        check_method_arg(it, method, native);
-      }
-    });
+  walk::methods(scope, [&](DexMethod* method) {
+    auto proto = method->get_proto();
+    bool native = is_native(method);
+    check_method_arg(proto->get_rtype(), method, native);
+    for (const auto it : *proto->get_args()) {
+      check_method_arg(it, method, native);
+    }
+  });
 }
 
 /**
@@ -299,25 +359,44 @@ void AnalysisImpl::collect_method_defs() {
  * fieldref or methodref.
  */
 void AnalysisImpl::analyze_opcodes() {
+  auto register_reference = [](SingleImplData& si, DexMethod* referrer,
+                               IRInstruction* insn,
+                               const cfg::InstructionIterator& insn_it) {
+    auto& map = si.referencing_methods[referrer];
+    auto [it, emplaced] = map.emplace(insn, insn_it);
+    always_assert(emplaced || it->second == insn_it);
+  };
 
-  auto check_arg = [&](DexType* type, DexMethodRef* meth, IRInstruction* insn) {
+  auto check_arg = [&](DexMethod* referrer,
+                       const cfg::InstructionIterator& insn_it,
+                       DexType* type,
+                       DexMethodRef* meth,
+                       IRInstruction* insn) {
     auto intf = get_and_check_single_impl(type);
     if (intf) {
-      single_impls[intf].methodrefs[meth].insert(insn);
+      auto& si = single_impls.at(intf);
+      std::lock_guard<std::mutex> lock(si.mutex);
+      register_reference(si, referrer, insn, insn_it);
+      si.methodrefs[meth].insert(insn);
     }
   };
 
-  auto check_sig = [&](DexMethodRef* meth, IRInstruction* insn) {
+  auto check_sig = [&](DexMethod* referrer,
+                       const cfg::InstructionIterator& insn_it,
+                       DexMethodRef* meth,
+                       IRInstruction* insn) {
     // check the sig for single implemented interface
     const auto proto = meth->get_proto();
-    check_arg(proto->get_rtype(), meth, insn);
-    const auto args = proto->get_args();
-    for (const auto arg : args->get_type_list()) {
-      check_arg(arg, meth, insn);
+    check_arg(referrer, insn_it, proto->get_rtype(), meth, insn);
+    for (const auto arg : *proto->get_args()) {
+      check_arg(referrer, insn_it, arg, meth, insn);
     }
   };
 
-  auto check_field = [&](DexFieldRef* field, IRInstruction* insn) {
+  auto check_field = [&](DexMethod* referrer,
+                         const cfg::InstructionIterator& insn_it,
+                         DexFieldRef* field,
+                         IRInstruction* insn) {
     auto cls = field->get_class();
     cls = get_and_check_single_impl(cls);
     if (cls) {
@@ -326,102 +405,132 @@ void AnalysisImpl::analyze_opcodes() {
     const auto type = field->get_type();
     auto intf = get_and_check_single_impl(type);
     if (intf) {
-      single_impls[intf].fieldrefs[field].push_back(insn);
+      auto& si = single_impls.at(intf);
+      std::lock_guard<std::mutex> lock(si.mutex);
+      register_reference(si, referrer, insn, insn_it);
+      si.fieldrefs[field].push_back(insn);
     }
   };
 
-  walk::opcodes(scope,
-               [](DexMethod* method) { return true; },
-               [&](DexMethod* method, IRInstruction* insn) {
-                 auto op = insn->opcode();
-                 switch (op) {
-                 // type ref
-                 case OPCODE_CONST_CLASS:
-                 case OPCODE_CHECK_CAST:
-                 case OPCODE_INSTANCE_OF:
-                 case OPCODE_NEW_INSTANCE:
-                 case OPCODE_NEW_ARRAY:
-                 case OPCODE_FILLED_NEW_ARRAY: {
-                   auto intf = get_and_check_single_impl(insn->get_type());
-                   if (intf) {
-                     single_impls[intf].typerefs.push_back(insn);
-                   }
-                   return;
-                 }
-                 // field ref
-                 case OPCODE_IGET:
-                 case OPCODE_IGET_WIDE:
-                 case OPCODE_IGET_OBJECT:
-                 case OPCODE_IPUT:
-                 case OPCODE_IPUT_WIDE:
-                 case OPCODE_IPUT_OBJECT: {
-                   DexFieldRef* field =
-                       resolve_field(insn->get_field(), FieldSearch::Instance);
-                   if (field == nullptr) {
-                     field = insn->get_field();
-                   }
-                   check_field(field, insn);
-                   return;
-                 }
-                 case OPCODE_SGET:
-                 case OPCODE_SGET_WIDE:
-                 case OPCODE_SGET_OBJECT:
-                 case OPCODE_SPUT:
-                 case OPCODE_SPUT_WIDE:
-                 case OPCODE_SPUT_OBJECT: {
-                   DexFieldRef* field =
-                       resolve_field(insn->get_field(), FieldSearch::Static);
-                   if (field == nullptr) {
-                     field = insn->get_field();
-                   }
-                   check_field(field, insn);
-                   return;
-                 }
-                 // method ref
-                 case OPCODE_INVOKE_INTERFACE: {
-                   // if it is an invoke on the interface method, collect it as
-                   // such
-                   const auto meth = insn->get_method();
-                   const auto owner = meth->get_class();
-                   const auto intf = get_and_check_single_impl(owner);
-                   if (intf) {
-                     // if the method ref is not defined on the interface itself
-                     // drop the optimization
-                     const auto& meths = type_class(intf)->get_vmethods();
-                     if (std::find(meths.begin(), meths.end(), meth) ==
-                         meths.end()) {
-                       escape_interface(intf, UNKNOWN_MREF);
-                     } else {
-                       single_impls[intf].intf_methodrefs[meth].insert(insn);
-                     }
-                   }
-                   check_sig(meth, insn);
-                   return;
-                 }
+  auto check_return = [&](DexMethod* referrer,
+                          const cfg::InstructionIterator& insn_it,
+                          IRInstruction* insn) {
+    auto rtype = referrer->get_proto()->get_rtype();
+    auto intf = get_and_check_single_impl(rtype);
+    if (intf) {
+      auto& si = single_impls.at(intf);
+      std::lock_guard<std::mutex> lock(si.mutex);
+      register_reference(si, referrer, insn, insn_it);
+    }
+  };
 
-                 case OPCODE_INVOKE_DIRECT:
-                 case OPCODE_INVOKE_STATIC:
-                 case OPCODE_INVOKE_VIRTUAL:
-                 case OPCODE_INVOKE_SUPER: {
-                   const auto meth = insn->get_method();
-                   check_sig(meth, insn);
-                   return;
-                 }
-                 default:
-                   return;
-                 }
-               });
+  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
+    redex_assert(code.editable_cfg_built());
+    auto ii = InstructionIterable(code.cfg());
+    auto end = ii.end();
+    for (auto it = ii.begin(); it != end; ++it) {
+      auto insn = it->insn;
+      auto op = insn->opcode();
+      switch (op) {
+      // type ref
+      case OPCODE_CONST_CLASS:
+      case OPCODE_CHECK_CAST:
+      case OPCODE_INSTANCE_OF:
+      case OPCODE_NEW_INSTANCE:
+      case OPCODE_NEW_ARRAY:
+      case OPCODE_FILLED_NEW_ARRAY: {
+        auto intf = get_and_check_single_impl(insn->get_type());
+        if (intf) {
+          auto& si = single_impls.at(intf);
+          std::lock_guard<std::mutex> lock(si.mutex);
+          register_reference(si, method, insn, it);
+          si.typerefs.push_back(insn);
+        }
+        break;
+      }
+      // field ref
+      case OPCODE_IGET:
+      case OPCODE_IGET_WIDE:
+      case OPCODE_IGET_OBJECT:
+      case OPCODE_IPUT:
+      case OPCODE_IPUT_WIDE:
+      case OPCODE_IPUT_OBJECT: {
+        DexFieldRef* field =
+            resolve_field(insn->get_field(), FieldSearch::Instance);
+        if (field == nullptr) {
+          field = insn->get_field();
+        }
+        check_field(method, it, field, insn);
+        break;
+      }
+      case OPCODE_SGET:
+      case OPCODE_SGET_WIDE:
+      case OPCODE_SGET_OBJECT:
+      case OPCODE_SPUT:
+      case OPCODE_SPUT_WIDE:
+      case OPCODE_SPUT_OBJECT: {
+        DexFieldRef* field =
+            resolve_field(insn->get_field(), FieldSearch::Static);
+        if (field == nullptr) {
+          field = insn->get_field();
+        }
+        check_field(method, it, field, insn);
+        break;
+      }
+      // method ref
+      case OPCODE_INVOKE_INTERFACE: {
+        // if it is an invoke on the interface method, collect it as such
+        const auto meth = insn->get_method();
+        const auto owner = meth->get_class();
+        const auto intf = get_and_check_single_impl(owner);
+        if (intf) {
+          // if the method ref is not defined on the interface
+          // itself drop the optimization
+          const auto& meths = type_class(intf)->get_vmethods();
+          if (std::find(meths.begin(), meths.end(), meth) == meths.end()) {
+            escape_interface(intf, UNKNOWN_MREF);
+          } else {
+            auto& si = single_impls.at(intf);
+            std::lock_guard<std::mutex> lock(si.mutex);
+            register_reference(si, method, insn, it);
+            si.intf_methodrefs[meth].insert(insn);
+          }
+        }
+        check_sig(method, it, meth, insn);
+        break;
+      }
+
+      case OPCODE_INVOKE_DIRECT:
+      case OPCODE_INVOKE_STATIC:
+      case OPCODE_INVOKE_VIRTUAL:
+      case OPCODE_INVOKE_SUPER: {
+        const auto meth = insn->get_method();
+        check_sig(method, it, meth, insn);
+        break;
+      }
+      case OPCODE_RETURN_OBJECT: {
+        check_return(method, it, insn);
+        break;
+      }
+      default:
+        break;
+      }
+    }
+  });
 }
 
 /**
  * Main analysis method
  */
 std::unique_ptr<SingleImplAnalysis> SingleImplAnalysis::analyze(
-    const Scope& scope, const DexStoresVector& stores,
-    const TypeMap& single_impl, const TypeSet& intfs,
+    const Scope& scope,
+    const DexStoresVector& stores,
+    const TypeMap& single_impl,
+    const TypeSet& intfs,
+    const ProguardMap& pg_map,
     const SingleImplConfig& config) {
   std::unique_ptr<AnalysisImpl> single_impls(
-      new AnalysisImpl(scope, stores));
+      new AnalysisImpl(scope, pg_map, stores));
   single_impls->create_single_impl(single_impl, intfs, config);
   single_impls->collect_field_defs();
   single_impls->collect_method_defs();
@@ -434,12 +543,13 @@ std::unique_ptr<SingleImplAnalysis> SingleImplAnalysis::analyze(
 void SingleImplAnalysis::escape_interface(DexType* intf, EscapeReason reason) {
   auto sit = single_impls.find(intf);
   if (sit == single_impls.end()) return;
+  if (sit->second.escape & reason) return;
+  std::lock_guard<std::mutex> lock(sit->second.mutex);
   sit->second.escape |= reason;
-  TRACE(INTF, 5, "(ESC) Escape %s => 0x%X\n", SHOW(intf), reason);
+  TRACE(INTF, 5, "(ESC) Escape %s => 0x%X", SHOW(intf), reason);
   const auto intf_cls = type_class(intf);
   if (intf_cls) {
-    const auto super_intfs = intf_cls->get_interfaces();
-    for (auto super_intf : super_intfs->get_type_list()) {
+    for (auto super_intf : *intf_cls->get_interfaces()) {
       escape_interface(super_intf, reason);
     }
   }
@@ -451,7 +561,7 @@ void SingleImplAnalysis::escape_interface(DexType* intf, EscapeReason reason) {
 void SingleImplAnalysis::get_interfaces(TypeList& to_optimize) const {
   for (const auto& sit : single_impls) {
     auto& data = sit.second;
-    assert(!data.is_escaped());
+    redex_assert(!data.is_escaped());
     if (data.children.empty()) {
       to_optimize.push_back(sit.first);
     }
@@ -465,9 +575,8 @@ void SingleImplAnalysis::get_interfaces(TypeList& to_optimize) const {
             [](const DexType* type1, const DexType* type2) {
               auto size1 = type_class(type1)->get_vmethods().size();
               auto size2 = type_class(type2)->get_vmethods().size();
-              return size1 == size2
-                         ? strcmp(type1->get_name()->c_str(),
-                                  type2->get_name()->c_str()) < 0
-                         : size1 < size2;
+              return size1 == size2 ? strcmp(type1->get_name()->c_str(),
+                                             type2->get_name()->c_str()) < 0
+                                    : size1 < size2;
             });
 }

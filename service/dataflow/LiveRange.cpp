@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "LiveRange.h"
@@ -13,12 +11,14 @@
 #include <boost/property_map/property_map.hpp>
 
 #include "ControlFlow.h"
-#include "FixpointIterators.h"
 #include "IRCode.h"
-#include "PatriciaTreeMapAbstractEnvironment.h"
-#include "PatriciaTreeSetAbstractDomain.h"
+#include "ScopedCFG.h"
+#include "Show.h"
+#include "Timer.h"
 
 namespace {
+
+AccumulatingTimer s_timer("live_range");
 
 using namespace live_range;
 
@@ -36,7 +36,7 @@ using DefSets = boost::disjoint_sets<RankPMap, ParentPMap>;
  */
 class SymRegMapper {
  public:
-  SymRegMapper(bool width_aware) : m_width_aware(width_aware) {}
+  explicit SymRegMapper(bool width_aware) : m_width_aware(width_aware) {}
 
   reg_t make(Def def) {
     if (m_def_to_reg.find(def) == m_def_to_reg.end()) {
@@ -60,12 +60,10 @@ class SymRegMapper {
   std::unordered_map<Def, reg_t> m_def_to_reg;
 };
 
-using UDChains = std::unordered_map<Use, PatriciaTreeSet<Def>>;
-
 /*
  * Put all defs with a use in common into the same set.
  */
-void unify_defs(const UDChains& chains, DefSets* def_sets) {
+void unify_defs(const UseDefChains& chains, DefSets* def_sets) {
   for (const auto& chain : chains) {
     auto& defs = chain.second;
     auto it = defs.begin();
@@ -77,91 +75,66 @@ void unify_defs(const UDChains& chains, DefSets* def_sets) {
   }
 }
 
-class DefsDomain final : public AbstractDomainReverseAdaptor<
-                             PatriciaTreeSetAbstractDomain<IRInstruction*>,
-                             DefsDomain> {
- public:
-  using AbstractDomainReverseAdaptor::AbstractDomainReverseAdaptor;
+template <typename Iter, typename Fn>
+void replay_analysis_with_callback(const cfg::ControlFlowGraph& cfg,
+                                   const Iter& iter,
+                                   bool ignore_unreachable,
+                                   Fn f) {
+  auto timer_scope = s_timer.scope();
 
-  // Some older compilers complain that the class is not default constructible.
-  // We intended to use the default constructors of the base class (via using
-  // AbstractDomainReverseAdaptor::AbstractDomainReverseAdaptor), but some
-  // compilers fail to catch this. So we insert a redundant '= default'.
-  DefsDomain() = default;
-
-  size_t size() const { return unwrap().size(); }
-
-  const PatriciaTreeSet<IRInstruction*>& elements() const {
-    return unwrap().elements();
-  }
-};
-
-class DefsEnvironment final
-    : public AbstractDomainReverseAdaptor<
-          PatriciaTreeMapAbstractEnvironment<reg_t, DefsDomain>,
-          DefsEnvironment> {
- public:
-  using AbstractDomainReverseAdaptor::AbstractDomainReverseAdaptor;
-
-  DefsDomain get(reg_t reg) { return unwrap().get(reg); }
-
-  DefsEnvironment& set(reg_t reg, const DefsDomain& value) {
-    unwrap().set(reg, value);
-    return *this;
-  }
-};
-
-class ReachingDefsFixpointIterator final
-    : public MonotonicFixpointIterator<cfg::GraphInterface, DefsEnvironment> {
- public:
-  using NodeId = cfg::Block*;
-
-  explicit ReachingDefsFixpointIterator(const cfg::ControlFlowGraph& cfg)
-      : MonotonicFixpointIterator(cfg, cfg.blocks().size()) {}
-
-  void analyze_node(const NodeId& block,
-                    DefsEnvironment* current_state) const override {
-    for (const auto& mie : InstructionIterable(block)) {
-      analyze_instruction(mie.insn, current_state);
-    }
-  }
-
-  void analyze_instruction(const IRInstruction* insn,
-                           DefsEnvironment* current_state) const {
-    if (insn->dests_size()) {
-      current_state->set(insn->dest(),
-                         DefsDomain(const_cast<IRInstruction*>(insn)));
-    }
-  }
-
-  DefsEnvironment analyze_edge(
-      const EdgeId&,
-      const DefsEnvironment& entry_state_at_source) const override {
-    return entry_state_at_source;
-  }
-};
-
-UDChains calculate_ud_chains(IRCode* code) {
-  auto& cfg = code->cfg();
-  ReachingDefsFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(DefsEnvironment());
-  UDChains chains;
   for (cfg::Block* block : cfg.blocks()) {
-    DefsEnvironment defs_in = fixpoint_iter.get_entry_state_at(block);
+    auto defs_in = iter.get_entry_state_at(block);
+    if (ignore_unreachable && defs_in.is_bottom()) {
+      continue;
+    }
     for (const auto& mie : InstructionIterable(block)) {
       auto insn = mie.insn;
-      for (size_t i = 0; i < insn->srcs_size(); ++i) {
+      for (src_index_t i = 0; i < insn->srcs_size(); ++i) {
+        Use use{insn, i};
         auto src = insn->src(i);
-        Use use{insn, src};
-        auto defs = defs_in.get(src);
-        always_assert_log(!defs.is_top() && defs.size() > 0,
-                          "Found use without def when processing [0x%lx]%s",
+        const auto& defs = defs_in.get(src);
+        if (defs.is_top() || defs.empty()) {
+          if (iter.has_filter()) {
+            continue;
+          }
+          not_reached_log("Found use without def when processing [0x%p]%s",
                           &mie, SHOW(insn));
-        chains[use] = defs.elements();
+        }
+        always_assert_log(!defs.is_bottom(),
+                          "Found unreachable use when processing [0x%p]%s",
+                          &mie, SHOW(insn));
+        f(use, defs);
       }
-      fixpoint_iter.analyze_instruction(insn, &defs_in);
+      iter.analyze_instruction(insn, &defs_in);
     }
   }
+}
+
+template <typename Iter>
+UseDefChains get_use_def_chains_impl(const cfg::ControlFlowGraph& cfg,
+                                     const Iter& iter,
+                                     bool ignore_unreachable) {
+  UseDefChains chains;
+  replay_analysis_with_callback(
+      cfg, iter, ignore_unreachable,
+      [&chains](const Use& use, const reaching_defs::Domain& defs) {
+        chains[use] = defs.elements();
+      });
+  return chains;
+}
+
+template <typename Iter>
+DefUseChains get_def_use_chains_impl(const cfg::ControlFlowGraph& cfg,
+                                     const Iter& iter,
+                                     bool ignore_unreachable) {
+  DefUseChains chains;
+  replay_analysis_with_callback(
+      cfg, iter, ignore_unreachable,
+      [&chains](const Use& use, const reaching_defs::Domain& defs) {
+        for (auto def : defs.elements()) {
+          chains[def].emplace(use);
+        }
+      });
   return chains;
 }
 
@@ -170,37 +143,78 @@ UDChains calculate_ud_chains(IRCode* code) {
 namespace live_range {
 
 bool Use::operator==(const Use& that) const {
-  return insn == that.insn && reg == that.reg;
+  return insn == that.insn && src_index == that.src_index;
+}
+
+Chains::Chains(const cfg::ControlFlowGraph& cfg,
+               bool ignore_unreachable,
+               reaching_defs::Filter filter)
+    : m_cfg(cfg),
+      m_fp_iter(cfg, std::move(filter)),
+      m_ignore_unreachable(ignore_unreachable) {
+  auto timer_scope = s_timer.scope();
+  m_fp_iter.run(reaching_defs::Environment());
+}
+
+UseDefChains Chains::get_use_def_chains() const {
+  return get_use_def_chains_impl(m_cfg, m_fp_iter, m_ignore_unreachable);
+}
+
+DefUseChains Chains::get_def_use_chains() const {
+  return get_def_use_chains_impl(m_cfg, m_fp_iter, m_ignore_unreachable);
+}
+
+MoveAwareChains::MoveAwareChains(const cfg::ControlFlowGraph& cfg,
+                                 bool ignore_unreachable,
+                                 reaching_defs::Filter filter)
+    : m_cfg(cfg),
+      m_fp_iter(cfg, std::move(filter)),
+      m_ignore_unreachable(ignore_unreachable) {
+  auto timer_scope = s_timer.scope();
+  m_fp_iter.run(reaching_defs::Environment());
+}
+
+UseDefChains MoveAwareChains::get_use_def_chains() const {
+  return get_use_def_chains_impl(m_cfg, m_fp_iter, m_ignore_unreachable);
+}
+
+DefUseChains MoveAwareChains::get_def_use_chains() const {
+  return get_def_use_chains_impl(m_cfg, m_fp_iter, m_ignore_unreachable);
 }
 
 void renumber_registers(IRCode* code, bool width_aware) {
-  auto chains = calculate_ud_chains(code);
+  cfg::ScopedCFG cfg(code);
+
+  auto ud_chains = Chains(*cfg).get_use_def_chains();
 
   Rank rank;
   Parent parent;
   DefSets def_sets((RankPMap(rank)), (ParentPMap(parent)));
-  for (const auto& mie : InstructionIterable(code)) {
-    if (mie.insn->dests_size()) {
+  for (const auto& mie : cfg::InstructionIterable(*cfg)) {
+    if (mie.insn->has_dest()) {
       def_sets.make_set(mie.insn);
     }
   }
-  unify_defs(chains, &def_sets);
+  unify_defs(ud_chains, &def_sets);
   SymRegMapper sym_reg_mapper(width_aware);
-  for (auto& mie : InstructionIterable(code)) {
+  for (auto& mie : cfg::InstructionIterable(*cfg)) {
     auto insn = mie.insn;
-    if (insn->dests_size()) {
+    if (insn->has_dest()) {
       auto sym_reg = sym_reg_mapper.make(def_sets.find_set(insn));
       insn->set_dest(sym_reg);
     }
   }
-  for (auto& mie : InstructionIterable(code)) {
+  for (auto& mie : cfg::InstructionIterable(*cfg)) {
     auto insn = mie.insn;
-    for (size_t i = 0; i < insn->srcs_size(); ++i) {
-      auto& defs = chains.at(Use{insn, insn->src(i)});
-      insn->set_src(i, sym_reg_mapper.at(def_sets.find_set(*defs.begin())));
+    for (src_index_t i = 0; i < insn->srcs_size(); ++i) {
+      auto defs = ud_chains.find(Use{insn, i});
+      always_assert_log(defs != ud_chains.end(),
+                        "No defs found for use %s src %u", SHOW(insn), i);
+      insn->set_src(
+          i, sym_reg_mapper.at(def_sets.find_set(*(defs->second).begin())));
     }
   }
-  code->set_registers_size(sym_reg_mapper.regs_size());
+  cfg->set_registers_size(sym_reg_mapper.regs_size());
 }
 
 } // namespace live_range

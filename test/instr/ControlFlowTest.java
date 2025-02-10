@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 package com.facebook.redex.test.instr;
@@ -14,16 +12,16 @@ import java.io.InputStream;
 import java.io.IOException;
 import java.util.Random;
 import org.junit.Test;
-import static org.fest.assertions.api.Assertions.*;
+import static org.assertj.core.api.Assertions.*;
 
 class E1 extends Error {}
 class E2 extends Error {}
 
-class ControlFlowTest {
+public class ControlFlowTest {
   Random rand = new Random();
 
   @Test
-  void simplest() {
+  public void simplest() {
     boolean caught = false;
     try {
       throw new E1();
@@ -34,7 +32,7 @@ class ControlFlowTest {
   }
 
   @Test
-  void nested1() {
+  public void nested1() {
     boolean caught1 = false;
     boolean caught2 = false;
     try {
@@ -55,7 +53,7 @@ class ControlFlowTest {
   }
 
   @Test
-  void nested2() {
+  public void nested2() {
     boolean caught1 = false;
     boolean caught2 = false;
     try {
@@ -76,7 +74,7 @@ class ControlFlowTest {
   }
 
   @Test
-  void rethrow() {
+  public void rethrow() {
     boolean caught = false;
     boolean caught_again = false;
     try {
@@ -94,7 +92,7 @@ class ControlFlowTest {
   }
 
   @Test
-  void callMayThrow1() {
+  public void callMayThrow1() {
     boolean caught1 = false;
     boolean caught2 = false;
     boolean ran_finally = false;
@@ -117,7 +115,7 @@ class ControlFlowTest {
   }
 
   @Test
-  void callMayThrow2() {
+  public void callMayThrow2() {
     boolean caught1 = false;
     boolean caught2 = false;
     boolean ran_finally = false;
@@ -140,7 +138,7 @@ class ControlFlowTest {
   }
 
   @Test
-  void callMayThrowWithRethrow() {
+  public void callMayThrowWithRethrow() {
     boolean caught1 = false;
     boolean caught2 = false;
     boolean ran_finally = false;
@@ -162,7 +160,7 @@ class ControlFlowTest {
   }
 
   @Test
-  void tryWithResources() throws Exception {
+  public void tryWithResources() throws Exception {
     boolean caught = false;
     boolean caught_again = false;
     try (InputStream s1 = new ByteArrayInputStream("foo".getBytes())) {

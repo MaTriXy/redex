@@ -1,0 +1,46 @@
+name: prepare_debian
+inputs:
+  save_boost_cache:
+    required: false
+    default: false
+  install_clang:
+    required: false
+    default: false
+  install_clang_llvm_org:
+    required: false
+    default: -1
+  mode_32:
+    required: false
+    default: false
+runs:
+  using: composite
+  steps:
+  - name: Timestamp (1)
+    run: date
+    shell: bash
+  # Reinitialize. It is easier to do this (again) to not have to deal with
+  # fixing `uses:` paths.
+  - uses: actions/checkout@v4.1.1
+    with:
+      path: repo
+      # We want the whole repo because of restore-mtime. Using filters is
+      # observably slower.
+      fetch-depth: 0
+  - name: Timestamp (2)
+    run: date
+    shell: bash
+  - uses: ./.github/actions/debian-based-image-build-setup
+    with:
+      mode_32: "${{ inputs.mode_32 }}"
+      install_clang: "${{ inputs.install_clang }}"
+      install_clang_llvm_org: "${{ inputs.install_clang_llvm_org }}"
+  - name: Timestamp (3)
+    run: date
+    shell: bash
+  - name: Run git-restore-mtime
+    run: git restore-mtime
+    working-directory: repo
+    shell: bash
+  - name: Timestamp (4)
+    run: date
+    shell: bash

@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -48,11 +46,10 @@ class EquivalenceTest {
   }
 
  protected:
-  EquivalenceTest() {
-    all_tests().push_back(this);
-  }
+  EquivalenceTest() { all_tests().push_back(this); }
 
  public:
+  virtual ~EquivalenceTest() = default;
   virtual std::string test_name() = 0;
   virtual void setup(DexClass*) {}
   virtual void build_method(DexMethod*) = 0;
@@ -62,8 +59,7 @@ class EquivalenceTest {
   static void generate_all(DexClass* cls);
 };
 
-#define REGISTER_TEST(TestName)\
-  static TestName TestName ## _singleton;
+#define REGISTER_TEST(TestName) static TestName TestName##_singleton;
 
 /**
  * Typically, we'll want to run a number of dex methods as input into a
@@ -74,12 +70,10 @@ class EquivalenceTest {
  * test name and the static initializer; all that's left is to implement
  * build_method.
  */
-#define EQUIVALENCE_TEST(BaseClass, TestName)\
-  class TestName : public BaseClass {\
-    virtual std::string test_name() {\
-      return #BaseClass #TestName;\
-    }\
-    virtual void build_method(DexMethod*);\
-  };\
-  REGISTER_TEST(TestName);\
+#define EQUIVALENCE_TEST(BaseClass, TestName)                        \
+  class TestName : public BaseClass {                                \
+    virtual std::string test_name() { return #BaseClass #TestName; } \
+    virtual void build_method(DexMethod*);                           \
+  };                                                                 \
+  REGISTER_TEST(TestName);                                           \
   void TestName::build_method

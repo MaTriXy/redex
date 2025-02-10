@@ -3,11 +3,11 @@
 
 AC_PREREQ([2.69])
 AC_INIT([redex], [1.0], [not-valid-yet@fb.com])
-AM_INIT_AUTOMAKE(redex, 1.0)
-
+AM_INIT_AUTOMAKE([subdir-objects])
 # clear out default cxx flags (was "-O2 -g") so that they don't override
-# the flags defined in AM_CXXFLAGS
-: ${CXXFLAGS=""}
+# the flags defined in AM_CXXFLAGS. add "-std" to work around gtest issue
+# on macos.
+: ${CXXFLAGS="-std=gnu++17"}
 
 # Checks for programs.
 AC_PROG_CXX
@@ -15,24 +15,140 @@ AC_PROG_CC
 
 LT_INIT
 
-AM_INIT_AUTOMAKE([subdir-objects])
-
 AC_CONFIG_MACRO_DIR([m4])
 
 AM_PATH_PYTHON([3.0], [], [AC_MSG_ERROR([Redex requires python3])])
 
 # Checks for libraries.
 AX_PTHREAD
-AX_BOOST_BASE([1.58.0], [], [AC_MSG_ERROR(
-              [Please install boost >= 1.58 (including filesystem)])])
+AX_BOOST_BASE([1.71.0], [], [AC_MSG_ERROR(
+              [Please install boost >= 1.71 (including filesystem)])])
 AX_BOOST_FILESYSTEM
-AX_BOOST_SYSTEM
 AX_BOOST_REGEX
 AX_BOOST_PROGRAM_OPTIONS
 AX_BOOST_IOSTREAMS
 AX_BOOST_THREAD
 AC_CHECK_LIB([z], [adler32], [], [AC_MSG_ERROR([Please install zlib])])
 AC_CHECK_LIB([jsoncpp], [main], [], [AC_MSG_ERROR([Please install jsoncpp])])
+
+# check whether user enabled protobuf
+AC_ARG_ENABLE([protobuf],
+    [AS_HELP_STRING([--enable-protobuf],
+        [Enable the protobuf for AppBundle build])],
+    [ AC_DEFINE(HAS_PROTOBUF) ]
+)
+
+AS_IF([test "x$enable_protobuf" = "xyes"], [
+    # user enabled protobuf
+    # check if protobuf is installed
+
+    # proto compiler
+    # allow users to specify the path to protobuf compiler
+    # --with-protoc
+
+    AC_ARG_WITH([protoc],
+        [AS_HELP_STRING([--with-protoc=/path/to/protoc],
+            [Location of the protobuf compiler.])],
+        [PROTOC="$withval"],
+        [ AS_IF([test "x${PROTOC}" == "x"],
+            [AC_PATH_PROG([PROTOC], [protoc], [no])])
+        ]
+    )
+    AS_IF([test "${PROTOC}" == "no"], [AC_MSG_ERROR([Protobuf compiler protoc not found.])])
+
+    # protobuf libraries
+    # allow users to specify the path to the protobuf libs
+    # --with-protolib
+
+    AC_ARG_WITH([protolib],
+        [AS_HELP_STRING([--with-protolib=/path/to/protolibs],
+            [Location of the protobuf lib dir.])],
+        [ # protobuf lib path set by user
+            LDFLAGS_ORIG=$LDFLAGS
+
+            # test protobuf
+            LDFLAGS="${LDFLAGS_ORIG} -L${withval}"
+            AC_LANG_PUSH([C++])
+            AC_CHECK_LIB([protobuf], [main], [
+            # library found
+                AC_SUBST([LIBPROTOBUF_LIBS], "-L${withval} -lprotobuf")],
+                [AC_MSG_ERROR([Protobuf libraries not found for user specified path.])]
+            )
+            AC_LANG_POP([C++])
+            # restore original LDFLAGS
+            LDFLAGS=$LDFLAGS_ORIG
+        ],
+        [ # check default search path
+            AC_CHECK_LIB([protobuf], [main], [
+                AC_SUBST([LIBPROTOBUF_LIBS], "-lprotobuf")],
+                [AC_MSG_ERROR([Protobuf libraries not found.])]
+            )
+        ]
+    )
+
+    # protobuf headers
+    # allow users to specify the path to the protobuf headers
+    # --with-protoheader
+
+    AC_ARG_WITH([protoheader],
+        [AS_HELP_STRING([--with-protoheader=/path/to/protoheaders],
+            [Location of the protobuf include dir.])],
+        [ # protobuf header path set by user
+            CXXFLAGS_ORIG=$CXXFLAGS
+
+            # test protobuf header
+            CXXFLAGS="-std=gnu++17 ${CXXFLAGS_ORIG} -I${withval}"
+            AC_LANG_PUSH([C++])
+            AC_CHECK_HEADER([google/protobuf/io/coded_stream.h], [
+                # library found
+                AC_SUBST([PROTOBUF_CXXFLAGS], "-I${withval}")],
+                [AC_MSG_ERROR([Protobuf headers not found for user specified path.])]
+            )
+            AC_LANG_POP([C++])
+            # restore original CXXFLAGS
+            CXXFLAGS=$CXXFLAGS_ORIG
+        ],
+        []
+    )
+])
+AM_CONDITIONAL([SET_PROTOBUF],[test "x${enable_protobuf}" = "xyes"])
+
+# Check for Android SDK (for tests).
+AC_ARG_WITH([android-sdk],
+    [AS_HELP_STRING([--with-android-sdk=/path/to/android-sdk],
+        [Location of the Android SDK, for testing.])],
+    [ANDROID_HOME="$withval"],
+    [NO_ANDROID_HOME="no"]
+    [ AS_IF([test "x${PROTOC}" == "x"],
+        [AC_PATH_PROG([PROTOC], [protoc], [no])])
+    ]
+)
+# Look for dx & android.jar.
+AS_IF([test "x$NO_ANDROID_HOME" = "xno"],
+    [],
+    [
+        # Do not assume a totally new SDK. Try platform 29.
+        AC_PATH_PROG(
+            DX,
+            dx,
+            no,
+            "$ANDROID_HOME/build-tools/29.0.2:$PATH"
+        )
+        AS_IF([test "x$DX" = "xno"],
+            [AC_MSG_ERROR([--with-android-sdk option was specified but does not seem to point at a valid Android SDK installation])]
+            []
+        )
+        AC_CHECK_FILE(
+            "$ANDROID_HOME/platforms/android-29/android.jar",
+            [
+                AC_SUBST(ANDROID_JAR,"$ANDROID_HOME/platforms/android-29/android.jar")
+                AC_SUBST(ANDROID_SDK,"$ANDROID_HOME")
+                AC_SUBST(ANDROID_PLATFORM_VERSION,"android-29")
+            ],
+            [AC_MSG_ERROR([--with-android-sdk option was specified but does not seem to point at a valid Android SDK installation])]
+        )
+    ]
+)
 
 # Checks for header files.
 AC_CHECK_HEADERS([arpa/inet.h fcntl.h inttypes.h memory.h netinet/in.h stddef.h stdint.h stdlib.h string.h sys/time.h unistd.h])
@@ -63,5 +179,9 @@ AC_CONFIG_FILES([
         Makefile
         test/Makefile
         test/integ/Makefile
-        test/unit/Makefile])
+        test/unit/Makefile
+        test/samples/Makefile
+        test/samples/more_resources/Makefile
+        test/samples/strings/Makefile
+        ])
 AC_OUTPUT

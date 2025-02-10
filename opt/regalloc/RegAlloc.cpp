@@ -1,90 +1,51 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "RegAlloc.h"
 
-#include <boost/functional/hash.hpp>
-
-#include "Dataflow.h"
+#include "Debug.h"
 #include "DexUtil.h"
 #include "GraphColoring.h"
-#include "IRCode.h"
-#include "IRInstruction.h"
-#include "LiveRange.h"
-#include "Transform.h"
+#include "PassManager.h"
+#include "RegisterAllocation.h"
+#include "Trace.h"
 #include "Walkers.h"
 
-using namespace regalloc;
+namespace regalloc {
+
+using Stats = graph_coloring::Allocator::Stats;
+
+void RegAllocPass::eval_pass(DexStoresVector&, ConfigFiles&, PassManager&) {
+  ++m_eval;
+}
 
 void RegAllocPass::run_pass(DexStoresVector& stores,
                             ConfigFiles&,
                             PassManager& mgr) {
-  using Data = std::nullptr_t;
-  using Output = graph_coloring::Allocator::Stats;
+  graph_coloring::Allocator::Config allocator_config;
+  const auto& jw = mgr.get_current_pass_info()->config;
+  jw.get("live_range_splitting", false, allocator_config.use_splitting);
+  allocator_config.no_overwrite_this =
+      mgr.get_redex_options().no_overwrite_this();
+
   auto scope = build_class_scope(stores);
-  auto stats = walk::parallel::reduce_methods<Data, Output>(
-      scope,
-      [this](Data&, DexMethod* m) { // mapper
-        graph_coloring::Allocator::Stats stats;
-        if (m->get_code() == nullptr) {
-          return stats;
-        }
-        auto& code = *m->get_code();
+  auto stats = walk::parallel::methods<Stats>(scope, [&](DexMethod* m) {
+    return graph_coloring::allocate(allocator_config, m);
+  });
 
-        TRACE(REG, 3, "Handling %s:\n", SHOW(m));
-        TRACE(REG,
-              5,
-              "regs:%d code:\n%s\n",
-              code.get_registers_size(),
-              SHOW(&code));
-        try {
-          // The transformations below all require a CFG. Build it once
-          // here instead of requiring each transform to build it.
-          code.build_cfg();
-          // It doesn't make sense to try to allocate registers in
-          // unreachable code. Remove it so that the allocator doesn't
-          // get confused.
-          transform::remove_unreachable_blocks(&code);
-          live_range::renumber_registers(&code, /* width_aware */ false);
-          graph_coloring::Allocator allocator(m_allocator_config);
-          allocator.allocate(&code);
-          stats.accumulate(allocator.get_stats());
-
-          TRACE(REG,
-                5,
-                "After alloc: regs:%d code:\n%s\n",
-                code.get_registers_size(),
-                SHOW(&code));
-        } catch (std::exception&) {
-          fprintf(stderr, "Failed to allocate %s\n", SHOW(m));
-          fprintf(stderr, "%s\n", SHOW(code.cfg()));
-          throw;
-        }
-        return stats;
-      },
-      [](Output a, Output b) { // reducer
-        a.accumulate(b);
-        return a;
-      },
-      [&](unsigned int) { // data initializer
-        return nullptr;
-      });
-
-  TRACE(REG, 1, "Total reiteration count: %lu\n", stats.reiteration_count);
-  TRACE(REG, 1, "Total Params spilled early: %lu\n", stats.params_spill_early);
-  TRACE(REG, 1, "Total spill count: %lu\n", stats.moves_inserted());
-  TRACE(REG, 1, "  Total param spills: %lu\n", stats.param_spill_moves);
-  TRACE(REG, 1, "  Total range spills: %lu\n", stats.range_spill_moves);
-  TRACE(REG, 1, "  Total global spills: %lu\n", stats.global_spill_moves);
-  TRACE(REG, 1, "  Total splits: %lu\n", stats.split_moves);
-  TRACE(REG, 1, "Total coalesce count: %lu\n", stats.moves_coalesced);
-  TRACE(REG, 1, "Total net moves: %ld\n", stats.net_moves());
+  TRACE(REG, 1, "Total reiteration count: %zu", stats.reiteration_count);
+  TRACE(REG, 1, "Total Params spilled early: %zu", stats.params_spill_early);
+  TRACE(REG, 1, "Total spill count: %zu", stats.moves_inserted());
+  TRACE(REG, 1, "  Total param spills: %zu", stats.param_spill_moves);
+  TRACE(REG, 1, "  Total range spills: %zu", stats.range_spill_moves);
+  TRACE(REG, 1, "  Total global spills: %zu", stats.global_spill_moves);
+  TRACE(REG, 1, "  Total splits: %zu", stats.split_moves);
+  TRACE(REG, 1, "Total coalesce count: %zu", stats.moves_coalesced);
+  TRACE(REG, 1, "Total net moves: %zu", stats.net_moves());
 
   mgr.incr_metric("param spilled too early", stats.params_spill_early);
   mgr.incr_metric("reiteration_count", stats.reiteration_count);
@@ -92,7 +53,15 @@ void RegAllocPass::run_pass(DexStoresVector& stores,
   mgr.incr_metric("coalesce_count", stats.moves_coalesced);
   mgr.incr_metric("net_moves", stats.net_moves());
 
-  mgr.record_running_regalloc();
+  ++m_run;
+  // For the last invocation, record that final register allocation has been
+  // done.
+  if (m_eval == m_run) {
+    TRACE(REG, 1, "Marking final register allocation");
+    mgr.record_running_regalloc();
+  }
 }
 
 static RegAllocPass s_pass;
+
+} // namespace regalloc

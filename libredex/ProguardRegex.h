@@ -1,22 +1,23 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
 #include <string>
+#include <string_view>
 
-namespace redex {
+namespace keep_rules {
 namespace proguard_parser {
 
-std::string form_member_regex(std::string proguard_regex);
-std::string form_type_regex(std::string proguard_regex);
-std::string convert_wildcard_type(std::string typ);
+std::string form_member_regex(const std::string& proguard_regex);
+std::string form_type_regex(const std::string& proguard_regex);
+bool has_special_char(const std::string& proguard_regex);
+std::string convert_wildcard_type(const std::string& typ);
+std::string convert_wildcard_type(std::string_view typ);
 
 } // namespace proguard_parser
-} // namespace redex
+} // namespace keep_rules

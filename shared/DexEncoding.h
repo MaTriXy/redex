@@ -1,19 +1,24 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include <sstream>
-#include <stdexcept>
-
-#include <stdint.h>
+#include <cstdint>
 #include <string>
+
+namespace dex_encoding {
+namespace details {
+
+// Hide throw details.
+[[noreturn]] void throw_invalid(const char* msg);
+[[noreturn]] void throw_invalid(const char* msg, uint32_t size);
+
+} // namespace details
+} // namespace dex_encoding
 
 /*
  * LEB128 is a DEX data type.  It was borrowed by DEX from the DWARF3
@@ -37,10 +42,10 @@
  */
 inline uint32_t read_uleb128(const uint8_t** _ptr) {
   const uint8_t* ptr = *_ptr;
-  int result = *(ptr++);
+  uint32_t result = *(ptr++);
 
   if (result > 0x7f) {
-    int cur = *(ptr++);
+    uint32_t cur = *(ptr++);
     result = (result & 0x7f) | ((cur & 0x7f) << 7);
     if (cur > 0x7f) {
       cur = *(ptr++);
@@ -79,6 +84,41 @@ inline uint8_t uleb128_encoding_size(uint32_t v) {
   return 5;
 }
 
+template <typename Assert>
+uint32_t read_uleb128_checked(std::string_view& ptr) {
+  auto next = [&ptr]() {
+    Assert::always(!ptr.empty(), "ULEB128 underflow");
+    uint8_t result = *ptr.data();
+    ptr = ptr.substr(1);
+    return result;
+  };
+
+  uint32_t result = next();
+  if (result > 0x7f) {
+    uint32_t cur = next();
+    result = (result & 0x7f) | ((cur & 0x7f) << 7);
+    if (cur > 0x7f) {
+      cur = next();
+      result |= (cur & 0x7f) << 14;
+      if (cur > 0x7f) {
+        cur = next();
+        result |= (cur & 0x7f) << 21;
+        if (cur > 0x7f) {
+          cur = next();
+          result |= cur << 28;
+        }
+      }
+    }
+  }
+  return result;
+}
+
+template <typename Assert>
+inline uint32_t read_uleb128p1_checked(std::string_view& ptr) {
+  int v = read_uleb128_checked<Assert>(ptr);
+  return (v - 1);
+}
+
 inline int32_t read_sleb128(const uint8_t** _ptr) {
   const uint8_t* ptr = *_ptr;
   int32_t result = *(ptr++);
@@ -108,6 +148,45 @@ inline int32_t read_sleb128(const uint8_t** _ptr) {
     }
   }
   *_ptr = ptr;
+  return result;
+}
+
+template <typename Assert>
+int32_t read_sleb128_checked(std::string_view& ptr) {
+  auto next = [&ptr]() {
+    Assert::always(!ptr.empty(), "SLEB128 underflow");
+    uint8_t result = *ptr.data();
+    ptr = ptr.substr(1);
+    return result;
+  };
+
+  int32_t result = next();
+
+  if (result <= 0x7f) {
+    result = (result << 25) >> 25;
+  } else {
+    int cur = next();
+    result = (result & 0x7f) | ((cur & 0x7f) << 7);
+    if (cur <= 0x7f) {
+      result = (result << 18) >> 18;
+    } else {
+      cur = next();
+      result |= (cur & 0x7f) << 14;
+      if (cur <= 0x7f) {
+        result = (result << 11) >> 11;
+      } else {
+        cur = next();
+        result |= (cur & 0x7f) << 21;
+        if (cur <= 0x7f) {
+          result = (result << 4) >> 4;
+        } else {
+          cur = next();
+          // Change from AOSP: avoid undefined shifting behavior.
+          result |= (cur & 0x0f) << 28;
+        }
+      }
+    }
+  }
   return result;
 }
 
@@ -146,7 +225,7 @@ inline uint8_t* write_sleb128(uint8_t* ptr, int32_t val) {
       *ptr++ = v;
       return ptr;
     }
-    if (val < 0 && val > -64) {
+    if (val < 0 && val >= -64) {
       /* Negative sleb termination */
       *ptr++ = v;
       return ptr;
@@ -163,7 +242,7 @@ inline uint32_t mutf8_next_code_point(const char*& s) {
   uint8_t v2 = *s++;
   if ((v2 & 0xc0) != 0x80) {
     /* Invalid string. */
-    throw std::invalid_argument("Invalid 2nd byte on mutf8 string");
+    dex_encoding::details::throw_invalid("Invalid 2nd byte on mutf8 string");
   }
   /* Two byte code point */
   if ((v & 0xe0) == 0xc0) {
@@ -174,24 +253,30 @@ inline uint32_t mutf8_next_code_point(const char*& s) {
     uint8_t v3 = *s++;
     if ((v2 & 0xc0) != 0x80) {
       /* Invalid string. */
-      throw std::invalid_argument("Invalid 3rd byte on mutf8 string");
+      dex_encoding::details::throw_invalid("Invalid 3rd byte on mutf8 string");
     }
     return (v & 0x1f) << 12 | (v2 & 0x3f) << 6 | (v3 & 0x3f);
   }
   /* Invalid string. */
-  throw std::invalid_argument("Invalid size encoding mutf8 string");
+  dex_encoding::details::throw_invalid("Invalid size encoding mutf8 string");
 }
 
-inline uint32_t length_of_utf8_string(const char* s) {
+// https://docs.oracle.com/javase/8/docs/api/java/lang/String.html#hashCode--
+inline int32_t java_hashcode_of_utf8_string(const char* s) {
   if (s == nullptr) {
     return 0;
   }
-  uint32_t len = 0;
+
+  union {
+    int32_t hash;
+    int64_t wide;
+  } ret;
+
+  ret.wide = 0;
   while (*s != '\0') {
-    ++len;
-    mutf8_next_code_point(s);
+    ret.wide = (ret.wide * 31 + mutf8_next_code_point(s)) & 0xFFFFFFFFll;
   }
-  return len;
+  return ret.hash;
 }
 
 inline uint32_t size_of_utf8_char(const int32_t ival) {
@@ -211,7 +296,8 @@ inline std::string encode_utf8_char_to_mutf8_string(const int32_t ival) {
   int idx = 0;
   if (size == 1) {
     if (ival > 0x7F) {
-      throw std::invalid_argument("Invalid utf8_char for encoding to mutf8 string");
+      dex_encoding::details::throw_invalid(
+          "Invalid utf8_char for encoding to mutf8 string");
     }
     if (ival == 0x00) { // \u0000 in 2 bytes
       buf[idx++] = 0xC0;
@@ -232,9 +318,7 @@ inline std::string encode_utf8_char_to_mutf8_string(const int32_t ival) {
     buf[idx++] = byte2;
     buf[idx++] = byte3;
   } else {
-    std::ostringstream exception_message;
-    exception_message << "Unexpected char size: " << size;
-    throw std::invalid_argument(exception_message.str());
+    dex_encoding::details::throw_invalid("Unexpected char size: ", size);
   }
 
   buf[idx] = 0x00;

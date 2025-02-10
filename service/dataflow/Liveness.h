@@ -1,48 +1,28 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include "ControlFlow.h"
-#include "FixpointIterators.h"
-#include "SparseSetAbstractDomain.h"
+#include <sparta/PatriciaTreeSetAbstractDomain.h>
 
-using LivenessDomain = SparseSetAbstractDomain;
+#include "BaseIRAnalyzer.h"
+#include "ControlFlow.h"
+
+using LivenessDomain = sparta::PatriciaTreeSetAbstractDomain<reg_t>;
 
 class LivenessFixpointIterator final
-    : public MonotonicFixpointIterator<
-          BackwardsFixpointIterationAdaptor<cfg::GraphInterface>,
-          LivenessDomain> {
+    : public ir_analyzer::BaseBackwardsIRAnalyzer<LivenessDomain> {
  public:
-  using NodeId = cfg::Block*;
+  explicit LivenessFixpointIterator(const cfg::ControlFlowGraph& cfg)
+      : ir_analyzer::BaseBackwardsIRAnalyzer<LivenessDomain>(cfg) {}
 
-  LivenessFixpointIterator(const cfg::ControlFlowGraph& cfg)
-      : MonotonicFixpointIterator(cfg, cfg.blocks().size()) {}
-
-  void analyze_node(const NodeId& block,
-                    LivenessDomain* current_state) const override {
-    for (auto it = block->rbegin(); it != block->rend(); ++it) {
-      if (it->type == MFLOW_OPCODE) {
-        analyze_instruction(it->insn, current_state);
-      }
-    }
-  }
-
-  LivenessDomain analyze_edge(
-      const EdgeId&,
-      const LivenessDomain& exit_state_at_source) const override {
-    return exit_state_at_source;
-  }
-
-  void analyze_instruction(const IRInstruction* insn,
-                           LivenessDomain* current_state) const {
-    if (insn->dests_size()) {
+  void analyze_instruction(IRInstruction* insn,
+                           LivenessDomain* current_state) const override {
+    if (insn->has_dest()) {
       current_state->remove(insn->dest());
     }
     for (size_t i = 0; i < insn->srcs_size(); ++i) {
@@ -50,11 +30,11 @@ class LivenessFixpointIterator final
     }
   }
 
-  LivenessDomain get_live_in_vars_at(const NodeId& block) const {
+  const LivenessDomain& get_live_in_vars_at(const NodeId& block) const {
     return get_exit_state_at(block);
   }
 
-  LivenessDomain get_live_out_vars_at(const NodeId& block) const {
+  const LivenessDomain& get_live_out_vars_at(const NodeId& block) const {
     return get_entry_state_at(block);
   }
 };

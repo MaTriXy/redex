@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "Shorten.h"
@@ -12,9 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
-#include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "Debug.h"
 #include "DexClass.h"
@@ -22,6 +20,8 @@
 #include "DexOutput.h"
 #include "DexUtil.h"
 #include "IRCode.h"
+#include "PassManager.h"
+#include "Show.h"
 #include "Walkers.h"
 #include "Warning.h"
 
@@ -46,10 +46,11 @@ static bool is_reasonable_string(const char* str, size_t len) {
   return true;
 }
 
-DexString* get_suitable_string(std::unordered_set<DexString*>& set,
-                               std::vector<DexString*>& dex_strings) {
-  while (dex_strings.size()) {
-    DexString* val = dex_strings.back();
+const DexString* get_suitable_string(
+    std::unordered_set<const DexString*>& set,
+    std::vector<const DexString*>& dex_strings) {
+  while (!dex_strings.empty()) {
+    auto val = dex_strings.back();
     dex_strings.pop_back();
     auto valstr = val->c_str();
     auto vallen = strlen(valstr);
@@ -63,27 +64,44 @@ DexString* get_suitable_string(std::unordered_set<DexString*>& set,
   return nullptr;
 }
 
-static void strip_src_strings(
-  DexStoresVector& stores, const char* map_path, PassManager& mgr) {
+static void strip_src_strings(DexStoresVector& stores,
+                              const char* map_path,
+                              PassManager& mgr) {
   size_t shortened = 0;
   size_t string_savings = 0;
-  std::unordered_map<DexString*, std::vector<DexString*>> global_src_strings;
-  std::unordered_set<DexString*> shortened_used;
+  std::unordered_map<const DexString*, std::vector<const DexString*>>
+      global_src_strings;
+  std::unordered_set<const DexString*> shortened_used;
+  for (auto& classes : DexStoreClassesIterator(stores)) {
+    for (auto const& clazz : classes) {
+      auto src_string = clazz->get_source_file();
+      if (src_string) {
+        // inserting actual source files into this set will cause them to not
+        // get used --- as the whole point of this analysis is to substitute
+        // source file strings
+        shortened_used.insert(src_string);
+      }
+    }
+  }
 
   for (auto& classes : DexStoreClassesIterator(stores)) {
-    std::unordered_map<DexString*, DexString*> src_to_shortened;
-    std::vector<DexString*> current_dex_strings;
+    std::unordered_map<const DexString*, const DexString*> src_to_shortened;
+    std::vector<const DexString*> current_dex_strings;
     for (auto const& clazz : classes) {
       clazz->gather_strings(current_dex_strings);
     }
     sort_unique(current_dex_strings, compare_dexstrings);
+    // reverse current_dex_strings vector, so that we prefer strings that will
+    // get smaller indices
+    std::reverse(std::begin(current_dex_strings),
+                 std::end(current_dex_strings));
 
     for (auto const& clazz : classes) {
       auto src_string = clazz->get_source_file();
       if (!src_string) {
         continue;
       }
-      DexString* shortened_src_string = nullptr;
+      const DexString* shortened_src_string = nullptr;
       if (src_to_shortened.count(src_string) == 0) {
         shortened_src_string =
             get_suitable_string(shortened_used, current_dex_strings);
@@ -104,8 +122,8 @@ static void strip_src_strings(
     }
   }
 
-  TRACE(SHORTEN, 1, "src strings shortened %ld, %lu bytes saved\n", shortened,
-      string_savings);
+  TRACE(SHORTEN, 1, "src strings shortened %zu, %zu bytes saved", shortened,
+        string_savings);
 
   mgr.incr_metric(METRIC_SHORTENED_STRINGS, shortened);
   mgr.incr_metric(METRIC_BYTES_SAVED, string_savings);
@@ -117,7 +135,7 @@ static void strip_src_strings(
     return;
   }
 
-  for (auto it : global_src_strings) {
+  for (const auto& it : global_src_strings) {
     auto desc_vector = it.second;
     sort_unique(desc_vector);
     fprintf(fd, "%s ->", it.first->c_str());
@@ -129,9 +147,10 @@ static void strip_src_strings(
   fclose(fd);
 }
 
-void ShortenSrcStringsPass::run_pass(
-    DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
-  m_filename_mappings = cfg.metafile(m_filename_mappings);
+void ShortenSrcStringsPass::run_pass(DexStoresVector& stores,
+                                     ConfigFiles& conf,
+                                     PassManager& mgr) {
+  m_filename_mappings = conf.metafile(m_filename_mappings);
   strip_src_strings(stores, m_filename_mappings.c_str(), mgr);
 }
 

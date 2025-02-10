@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -13,9 +11,10 @@
 #include "memory-accounter.h"
 
 #include <cstring>
+#include <functional>
 #include <vector>
 
-typedef uint32_t VdexChecksum;
+using VdexChecksum = uint32_t;
 
 constexpr uint32_t kDexMagicNum = 0x0a786564;
 
@@ -91,10 +90,15 @@ class stream {
   stream() = delete;
   ~stream() = delete;
 
-  using InsnWalkerFn = const std::function<void(DexOpcode, const uint16_t* const ptr)>&;
+  using InsnWalkerFn =
+      const std::function<void(DexOpcode, const uint16_t* const ptr)>&;
   using CodeItemWalkerFn = const std::function<void(const uint8_t* const ptr)>&;
 
-  static void stream_dex(const uint8_t* begin, const size_t size, InsnWalkerFn walker, CodeItemWalkerFn code_item_walker = nullptr);
+  static void stream_dex(
+      const uint8_t* begin,
+      const size_t size,
+      InsnWalkerFn walker,
+      CodeItemWalkerFn code_item_walker = [](const uint8_t* const insn) {});
 };
 
 void print_dex_opcodes(const uint8_t* begin, const size_t size);

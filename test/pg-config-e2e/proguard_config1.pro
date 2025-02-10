@@ -139,8 +139,14 @@
 -keep class android.support.test.runner.AndroidJUnitRunner {
     <init>(...);
 }
+-keep class androidx.test.runner.AndroidJUnitRunner {
+    <init>(...);
+}
 
 # view AndroidManifest.xml #generated:13
 -keep class com.facebook.redex.test.proguard.ProguardTest {
     <init>(...);
 }
+-dontwarn android.content.**
+
+-dontwarn org.xmlpull.v1.**

@@ -1,25 +1,30 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include <vector>
 #include "Pass.h"
+#include <vector>
 
 class PeepholePass : public Pass {
  public:
   PeepholePass() : Pass("PeepholePass") {}
 
-  virtual void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
+  redex_properties::PropertyInteractions get_property_interactions()
+      const override {
+    using namespace redex_properties::interactions;
+    using namespace redex_properties::names;
+    return {};
+  }
 
-  virtual void configure_pass(const PassConfig& pc) override {
-    pc.get("disabled_peepholes", {}, config.disabled_peepholes);
+  void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
+
+  void bind_config() override {
+    bind("disabled_peepholes", {}, config.disabled_peepholes);
   }
 
  private:

@@ -1,22 +1,25 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include "DexClass.h"
-#include "DexUtil.h"
-#include "ClassHierarchy.h"
-#include "Timer.h"
-#include <vector>
 #include <map>
 #include <unordered_map>
+#include <vector>
 
+#include "ClassHierarchy.h"
+#include "DexClass.h"
+#include "DexUtil.h"
+#include "Timer.h"
+
+/*
+ * NOTE: Before using this code, check and see if MethodOverrideGraph.h or
+ * HierarchyUtil.h can serve your needs -- they should be more efficient.
+ */
 
 /**
  * Flags to mark virtual method state.
@@ -31,7 +34,9 @@
  * OVERRIDE: a child of a TOP_DEF
  * OVERRIDE | FINAL: a leaf method
  * TOP_DEF | FINAL: a method that is virtual only because
- *    of visibility but could be made static
+ *    of visibility but could be made static (FIXME: This flag currently seems
+ *    to be erroroneously applied to external non-final methods, which we cannot
+ *    safely conclude are final)
  * IMPL | <one of the above>: the method contributes (lexically) to
  *    interface resolution
  * MIRANDA | <above>: the method is an implementation of an interface at the
@@ -43,8 +48,12 @@
  *    and so we cannot tell anything about all methods in the branch where that
  *    happened. The method is effectively unknown
  */
+
+namespace virt_scope {
+
+/* clang-format off */
 enum VirtualFlags : uint16_t {
-  // the top method definition (DexMehthod) in a VirtualScope.
+  // the top method definition (DexMethod) in a VirtualScope.
   // This is where the method was first introduced for the virtual scope.
   TOP_DEF =         0x0,
   // the method is an override, it has a parent
@@ -61,21 +70,43 @@ enum VirtualFlags : uint16_t {
   // up to object will have to escape
   ESCAPED =         0x100,
 };
+/* clang-format on */
+
 inline VirtualFlags operator|=(VirtualFlags& a, const VirtualFlags b) {
-  return (a = static_cast<VirtualFlags>(
-      static_cast<uint16_t>(a) | static_cast<uint16_t>(b)));
+  return (a = static_cast<VirtualFlags>(static_cast<uint16_t>(a) |
+                                        static_cast<uint16_t>(b)));
 }
 inline VirtualFlags operator&=(VirtualFlags& a, const VirtualFlags b) {
-  return (a = static_cast<VirtualFlags>(
-      static_cast<uint16_t>(a) & static_cast<uint16_t>(b)));
+  return (a = static_cast<VirtualFlags>(static_cast<uint16_t>(a) &
+                                        static_cast<uint16_t>(b)));
 }
 inline VirtualFlags operator|(const VirtualFlags a, const VirtualFlags b) {
-  return static_cast<VirtualFlags>(
-      static_cast<uint16_t>(a) | static_cast<uint16_t>(b));
+  return static_cast<VirtualFlags>(static_cast<uint16_t>(a) |
+                                   static_cast<uint16_t>(b));
 }
 inline VirtualFlags operator&(const VirtualFlags a, const VirtualFlags b) {
-  return static_cast<VirtualFlags>(
-      static_cast<uint16_t>(a) & static_cast<uint16_t>(b));
+  return static_cast<VirtualFlags>(static_cast<uint16_t>(a) &
+                                   static_cast<uint16_t>(b));
+}
+
+inline bool is_top_def(VirtualFlags flags) {
+  return (flags & TOP_DEF) == TOP_DEF;
+}
+
+inline bool is_override(VirtualFlags flags) {
+  return (flags & OVERRIDE) == OVERRIDE;
+}
+
+inline bool is_impl(VirtualFlags flags) { return (flags & IMPL) == IMPL; }
+
+inline bool is_final(VirtualFlags flags) { return (flags & FINAL) == FINAL; }
+
+inline bool is_miranda(VirtualFlags flags) {
+  return (flags & MIRANDA) == MIRANDA;
+}
+
+inline bool is_escaped(VirtualFlags flags) {
+  return (flags & ESCAPED) == ESCAPED;
 }
 
 // (DexMethod, VirtualFlags)
@@ -113,6 +144,15 @@ struct VirtualScope {
   std::vector<VirtualMethod> methods;
   // interface set the VirtualScope contributes to
   TypeSet interfaces;
+
+  bool has_def() const {
+    for (auto& meth : methods) {
+      if (meth.first->is_def()) {
+        return true;
+      }
+    }
+    return false;
+  }
 };
 
 using InterfaceScope = std::vector<const VirtualScope*>;
@@ -126,12 +166,12 @@ bool can_rename_scope(const VirtualScope* scope);
  * Return true if a VirtualScope contributes to interface resolution.
  */
 inline bool is_impl_scope(const VirtualScope* scope) {
-  return scope->interfaces.size() > 0;
+  return !scope->interfaces.empty();
 }
 
 /**
  * Return true if a VirtualScope is composed by a single non impl method.
- * Effectively if themethod is devirtualizable.
+ * Effectively if the method is devirtualizable.
  */
 inline bool is_non_virtual_scope(const VirtualScope* scope) {
   if (scope->methods[0].second ==
@@ -203,8 +243,8 @@ SignatureMap build_signature_map(const ClassHierarchy& class_hierarchy);
 /**
  * Given a DexMethod return the scope the method is in.
  */
-const VirtualScope& find_virtual_scope(
-    const SignatureMap& sig_map, const DexMethod* meth);
+const VirtualScope& find_virtual_scope(const SignatureMap& sig_map,
+                                       const DexMethod* meth);
 
 /**
  * Given a VirtualScope and a type, return the list of methods that
@@ -221,8 +261,8 @@ const VirtualScope& find_virtual_scope(
  * A call to select_from() with C with return only C.m() and D.m() which
  * are the only 2 methods in scope for C.
  */
-std::vector<const DexMethod*> select_from(
-    const VirtualScope* scope, const DexType* type);
+std::vector<const DexMethod*> select_from(const VirtualScope* scope,
+                                          const DexType* type);
 
 /*
  * Map from a class to the virtual scopes introduced by that class.
@@ -233,10 +273,11 @@ std::vector<const DexMethod*> select_from(
  * the type. So the number of VirtualScope is always smaller or
  * equals to the number of vmethods (unimplemented interface aside).
  */
-using Scopes = std::unordered_map<
-    const DexType*, std::vector<const VirtualScope*>>;
-using InterfaceScopes = std::unordered_map<
-    const DexType*, std::vector<std::vector<const VirtualScope*>>>;
+using Scopes =
+    std::unordered_map<const DexType*, std::vector<const VirtualScope*>>;
+using InterfaceScopes =
+    std::unordered_map<const DexType*,
+                       std::vector<std::vector<const VirtualScope*>>>;
 
 class ClassScopes {
  private:
@@ -250,8 +291,13 @@ class ClassScopes {
   InterfaceMap m_interface_map;
   SignatureMap m_sig_map;
 
+  static std::string show_type(const DexType* type); // To avoid "Show.h" in the
+                                                     // header.
+
  public:
   explicit ClassScopes(const Scope& scope);
+
+  const ClassHierarchy& get_parent_to_children() const;
 
   /**
    * Return the vector of VirtualScope for the given type.
@@ -287,17 +333,17 @@ class ClassScopes {
    * scopes and an interface set for each pair of (method_name, method_sig).
    */
   template <class AllInterfaceScopesWalkerFn =
-      void(const DexString*,
-          const DexProto*,
-          const std::vector<const VirtualScope*>&,
-          const TypeSet&)>
+                void(const DexString*,
+                     const DexProto*,
+                     const std::vector<const VirtualScope*>&,
+                     const TypeSet&)>
   void walk_all_intf_scopes(AllInterfaceScopesWalkerFn walker) const {
     for (const auto& names_it : m_sig_map) {
-      for (const auto sig_it : names_it.second) {
+      for (const auto& sig_it : names_it.second) {
         std::vector<const VirtualScope*> intf_scopes;
         TypeSet intfs;
         for (auto& scope : sig_it.second) {
-          assert(type_class(scope.type) != nullptr);
+          redex_assert(type_class(scope.type) != nullptr);
           if (scope.interfaces.empty()) continue;
           intf_scopes.emplace_back(&scope);
           intfs.insert(scope.interfaces.begin(), scope.interfaces.end());
@@ -313,11 +359,10 @@ class ClassScopes {
    * The walk is top down the class hierarchy starting from the
    * specified type.
    */
-  template <class VirtualScopeWalkerFn =
-      void(const DexType*, const VirtualScope*)>
-  void walk_virtual_scopes(
-      const DexType* type,
-      VirtualScopeWalkerFn walker) const {
+  template <class VirtualScopeWalkerFn = void(const DexType*,
+                                              const VirtualScope*)>
+  void walk_virtual_scopes(const DexType* type,
+                           VirtualScopeWalkerFn walker) const {
     const auto& scopes_it = m_scopes.find(type);
     // first walk all scopes in type
     if (scopes_it != m_scopes.end()) {
@@ -325,9 +370,9 @@ class ClassScopes {
         walker(type, scope);
       }
     }
-    always_assert_log(
-        m_hierarchy.find(type) != m_hierarchy.end(),
-        "no entry in ClassHierarchy for type %s\n", SHOW(type));
+    always_assert_log(m_hierarchy.find(type) != m_hierarchy.end(),
+                      "no entry in ClassHierarchy for type %s\n",
+                      show_type(type).c_str());
     // recursively call for each child
     for (const auto& child : m_hierarchy.at(type)) {
       walk_virtual_scopes(child, walker);
@@ -338,10 +383,10 @@ class ClassScopes {
    * Walk every VirtualScope starting from java.lang.Object and call the walker
    * function for each scope.
    */
-  template <class VirtualScopeWalkerFn =
-      void(const DexType*, const VirtualScope*)>
+  template <class VirtualScopeWalkerFn = void(const DexType*,
+                                              const VirtualScope*)>
   void walk_virtual_scopes(VirtualScopeWalkerFn walker) const {
-    walk_virtual_scopes(get_object_type(), walker);
+    walk_virtual_scopes(type::java_lang_Object(), walker);
   }
 
   /**
@@ -349,18 +394,17 @@ class ClassScopes {
    * The walk is top down the class hierarchy starting from the given type.
    */
   template <class VirtualScopesWalkerFn =
-      void(const DexType*, const std::vector<const VirtualScope*>&)>
-  void walk_class_scopes(
-      const DexType* type,
-      VirtualScopesWalkerFn walker) const {
+                void(const DexType*, const std::vector<const VirtualScope*>&)>
+  void walk_class_scopes(const DexType* type,
+                         VirtualScopesWalkerFn walker) const {
     const auto& scopes_it = m_scopes.find(type);
     // first walk all scopes in type
     if (scopes_it != m_scopes.end()) {
       walker(type, scopes_it->second);
     }
-    always_assert_log(
-        m_hierarchy.find(type) != m_hierarchy.end(),
-        "no entry in ClassHierarchy for type %s\n", SHOW(type));
+    always_assert_log(m_hierarchy.find(type) != m_hierarchy.end(),
+                      "no entry in ClassHierarchy for type %s\n",
+                      show_type(type).c_str());
     // recursively call for each child
     for (const auto& child : m_hierarchy.at(type)) {
       walk_class_scopes(child, walker);
@@ -372,16 +416,16 @@ class ClassScopes {
    * The walk is top down the class hierarchy starting from java.lang.Object.
    */
   template <class VirtualScopesWalkerFn =
-      void(const DexType*, const std::vector<const VirtualScope*>&)>
+                void(const DexType*, const std::vector<const VirtualScope*>&)>
   void walk_class_scopes(VirtualScopesWalkerFn walker) const {
-    walk_class_scopes(get_object_type(), walker);
+    walk_class_scopes(type::java_lang_Object(), walker);
   }
 
   /**
    * Given a DexMethod return the scope the method is in.
    */
   const VirtualScope& find_virtual_scope(const DexMethod* meth) const {
-    return ::find_virtual_scope(m_sig_map, meth);
+    return virt_scope::find_virtual_scope(m_sig_map, meth);
   }
 
   /**
@@ -394,96 +438,26 @@ class ClassScopes {
    * The ClassHierarchy lifetime is tied to that of the ClassScopes, as
    * such it should not exceed it.
    */
-  const ClassHierarchy& get_class_hierarchy() const {
-    return m_hierarchy;
-  }
+  const ClassHierarchy& get_class_hierarchy() const { return m_hierarchy; }
 
   /**
    * Return the InterfaceMap known when building the scopes.
    * The InterfaceMap lifetime is tied to that of the ClassScopes, as
    * such it should not exceed it.
    */
-  const InterfaceMap& get_interface_map() const {
-    return m_interface_map;
-  }
+  const InterfaceMap& get_interface_map() const { return m_interface_map; }
 
   /**
    * Return the SignatureMap known when building the scopes.
    * The SignatureMap lifetime is tied to that of the ClassScopes, as
    * such it should not exceed it.
    */
-  const SignatureMap& get_signature_map() const {
-    return m_sig_map;
-  }
+  const SignatureMap& get_signature_map() const { return m_sig_map; }
 
  private:
   void build_class_scopes(const DexType* type);
   void build_interface_scopes();
 };
-
-//
-// Helpers
-//
-
-/**
- * Given a scope find all virtual methods that can be devirtualized.
- * That is, methods that have a unique definition in the vmethods across
- * a hierarchy. Basically all methods that are virtual because of visibility
- * (public, package and protected) and not because they need to be virtual.
- */
-inline std::vector<DexMethod*> devirtualize(const SignatureMap& sig_map) {
-  Timer timer("Devirtualizer inner");
-  std::vector<DexMethod*> non_virtual;
-  for (const auto& proto_it : sig_map) {
-    for (const auto& scopes : proto_it.second) {
-      for (const auto& scope : scopes.second) {
-        if (type_class(scope.type) == nullptr ||
-            is_interface(type_class(scope.type)) ||
-            scope.interfaces.size() > 0) {
-          continue;
-        }
-        for (const auto& meth : scope.methods) {
-          if (!meth.first->is_concrete()) continue;
-          if (meth.second != FINAL) {
-            break;
-          }
-          always_assert(scope.interfaces.size() == 0);
-          non_virtual.push_back(meth.first);
-        }
-      }
-    }
-  }
-  return non_virtual;
-}
-
-inline std::vector<DexMethod*> devirtualize(
-    const std::vector<DexClass*>& scope) {
-  Timer timer("Devirtualizer");
-  ClassHierarchy class_hierarchy = build_type_hierarchy(scope);
-  auto signature_map = build_signature_map(class_hierarchy);
-  return devirtualize(signature_map);
-}
-
-inline bool can_devirtualize(SignatureMap& sig_map, DexMethod* meth) {
-  always_assert(meth->is_virtual());
-  auto& proto_map = sig_map[meth->get_name()];
-  auto& scopes = proto_map[meth->get_proto()];
-  for (const auto& scope : scopes) {
-    if (scope.type != meth->get_class()) {
-      continue;
-    }
-
-    for (const auto& m : scope.methods) {
-      if (!m.first->is_concrete()) continue;
-      if (m.second != FINAL) {
-        break;
-      }
-      always_assert(scope.interfaces.size() == 0);
-      return true;
-    }
-  }
-  return false;
-}
 
 /**
  * Return the list of virtual methods for a given type.
@@ -491,3 +465,11 @@ inline bool can_devirtualize(SignatureMap& sig_map, DexMethod* meth) {
  * it generates fictional methods for it.
  */
 const std::vector<DexMethod*>& get_vmethods(const DexType* type);
+
+struct virtualscopes_comparator {
+  bool operator()(const VirtualScope* a, const VirtualScope* b) const {
+    return compare_dexmethods(a->methods.at(0).first, b->methods.at(0).first);
+  }
+};
+
+} // namespace virt_scope

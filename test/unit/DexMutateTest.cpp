@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <gtest/gtest.h>
@@ -12,6 +10,7 @@
 #include "Creators.h"
 #include "DexClass.h"
 #include "RedexContext.h"
+#include "RedexTest.h"
 
 DexFieldRef* make_field_ref(DexType* cls, const char* name, DexType* type) {
   return DexField::make_field(cls, DexString::make_string(name), type);
@@ -35,7 +34,7 @@ DexField* make_field_def(DexType* cls,
 
 DexClass* create_class(DexType* type,
                        DexType* super,
-                       std::vector<DexField*> fields,
+                       const std::vector<DexField*>& fields,
                        DexAccessFlags access = ACC_PUBLIC,
                        bool external = false) {
   ClassCreator creator(type);
@@ -50,13 +49,15 @@ DexClass* create_class(DexType* type,
   return creator.create();
 }
 
-TEST(RenameMembers, rename) {
-  g_redex = new RedexContext();
+class RenameMembersTest : public RedexTest {};
+
+TEST_F(RenameMembersTest, rename) {
   auto obj_t = DexType::make_type("Ljava/lang/Object;");
   auto int_t = DexType::make_type("I");
   auto a = DexType::make_type("A");
   auto field = make_field_def(a, "wombat", int_t, ACC_PUBLIC, true);
-  auto cls_A = create_class(a, obj_t, {field}, ACC_PUBLIC, true);
+  [[maybe_unused]] auto cls_A =
+      create_class(a, obj_t, {field}, ACC_PUBLIC, true);
   std::string name_before = field->get_name()->c_str();
   ASSERT_EQ("wombat", name_before);
   DexFieldSpec spec;

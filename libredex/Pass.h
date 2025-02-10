@@ -1,169 +1,114 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include <string>
-#include <vector>
-#include <json/json.h>
-#include <iostream>
 #include <algorithm>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
+#include "Configurable.h"
 #include "DexStore.h"
-#include "ConfigFiles.h"
-#include "PassRegistry.h"
+#include "RedexProperties.h"
+#include "Traits.h"
 
+class AnalysisUsage;
+struct ConfigFiles;
 class PassManager;
 
-class PassConfig {
+class Pass : public Configurable {
  public:
-  explicit PassConfig(const Json::Value& cfg) : m_config(cfg) {}
+  enum Kind {
+    TRANSFORMATION,
+    ANALYSIS,
+  };
 
-  void get(const char* name, int64_t dflt, int64_t& param) const {
-    param = m_config.get(name, (Json::Int64)dflt).asInt();
+  explicit Pass(const std::string& name, Kind kind = TRANSFORMATION);
+
+  const std::string& name() const { return m_name; }
+
+  std::string get_config_name() override { return name(); };
+
+  bool is_analysis_pass() const { return m_kind == ANALYSIS; }
+
+  // \returns True means this pass is NOT guaranteed to fully use editable cfg.
+  virtual bool is_cfg_legacy() { return false; }
+
+  virtual void destroy_analysis_result() {
+    always_assert_log(m_kind != ANALYSIS,
+                      "destroy_analysis_result not implemented for %s",
+                      m_name.c_str());
   }
 
-  void get(
-    const char* name,
-    const std::string& dflt,
-    std::string& param
-  ) const {
-    param = m_config.get(name, dflt).asString();
+  virtual redex_properties::PropertyInteractions get_property_interactions()
+      const {
+    return {};
   }
-
-  void get(const char* name, bool dflt, bool& param) const {
-    auto val = m_config.get(name, dflt);
-
-    // Do some simple type conversions that folly used to do
-    if (val.isBool()) {
-      param = val.asBool();
-      return;
-    } else if (val.isInt()) {
-      auto valInt = val.asInt();
-      if (valInt == 0 || valInt == 1) {
-        param = (val.asInt() != 0);
-        return;
-      }
-    } else if (val.isString()) {
-      auto str = val.asString();
-      std::transform(str.begin(), str.end(), str.begin(), [](auto c) {
-        return ::tolower(c);
-      });
-      if (str == "0" || str == "false" || str == "off" || str == "no") {
-        param = false;
-        return;
-      } else if (str == "1" || str == "true" || str == "on" || str == "yes") {
-        param = true;
-        return;
-      }
-    }
-    throw std::runtime_error("Cannot convert JSON value to bool: " + val.asString());
-  }
-
-  void get(
-    const char* name,
-    const std::vector<std::string>& dflt,
-    std::vector<std::string>& param
-  ) const {
-    auto it = m_config[name];
-    if (it == Json::nullValue) {
-      param = dflt;
-    } else {
-      param.clear();
-      for (auto const& str : it) {
-        param.emplace_back(str.asString());
-      }
-    }
-  }
-
-  void get(
-    const char* name,
-    const std::vector<std::string>& dflt,
-    std::unordered_set<std::string>& param
-  ) const {
-    auto it = m_config[name];
-    param.clear();
-    if (it == Json::nullValue) {
-      param.insert(
-          dflt.begin(),
-          dflt.end());
-    } else {
-      for (auto const& str : it) {
-        param.emplace(str.asString());
-      }
-    }
-  }
-
-  void get(
-           const char* name,
-           const std::unordered_map<std::string, std::vector<std::string>>& dflt,
-           std::unordered_map<std::string, std::vector<std::string>>& param
-           ) const {
-    auto cfg = m_config[name];
-    param.clear();
-    if (cfg == Json::nullValue) {
-      param = dflt;
-    } else {
-      if (!cfg.isObject()) {
-        throw std::runtime_error("Cannot convert JSON value to object: " + cfg.asString());
-      }
-      for (auto it = cfg.begin() ; it != cfg.end() ; ++it) {
-        auto key = it.key();
-        if (!key.isString()) {
-          throw std::runtime_error("Cannot convert JSON value to string: " + key.asString());
-        }
-        auto& val = *it;
-        if (!val.isArray()) {
-          throw std::runtime_error("Cannot convert JSON value to array: " + val.asString());
-        }
-        for (auto& str : val) {
-          if (!str.isString()) {
-            throw std::runtime_error("Cannot convert JSON value to string: " + str.asString());
-          }
-          param[key.asString()].push_back(str.asString());
-        }
-      }
-    }
-  }
-
-  void get(const char* name, const Json::Value dflt, Json::Value& param) const {
-    param = m_config.get(name, dflt);
-  }
-
- private:
-  Json::Value m_config;
-};
-
-class Pass {
- public:
-
-  Pass(const std::string& name)
-     : m_name(name) {
-    PassRegistry::get().register_pass(this);
-  }
-
-  virtual ~Pass() {}
-
-  std::string name() const { return m_name; }
-
-  virtual void configure_pass(const PassConfig&) {}
 
   /**
-   * All passes' eval_pass are run, and then all passes' run_pass are run. This allows each
-   * pass to evaluate its rules in terms of the original input, without other passes changing
-   * the identity of classes. You should NOT change anything in the dex stores in eval_pass.
-   * There is no protection against doing so, this is merely a convention.
+   * All passes' eval_pass are run, and then all passes' run_pass are run. This
+   * allows each pass to evaluate its rules in terms of the original input,
+   * without other passes changing the identity of classes. You should NOT
+   * change anything in the dex stores in eval_pass. There is no protection
+   * against doing so, this is merely a convention.
    */
 
-  virtual void eval_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {};
-  virtual void run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) = 0;
+  virtual void eval_pass(DexStoresVector& stores,
+                         ConfigFiles& conf,
+                         PassManager& /* mgr */) {}
+  virtual void run_pass(DexStoresVector& stores,
+                        ConfigFiles& conf,
+                        PassManager& mgr) = 0;
+
+  virtual void set_analysis_usage(AnalysisUsage& analysis_usage) const;
+
+  Configurable::Reflection reflect() override;
+
+  virtual std::unique_ptr<Pass> clone(const std::string& /*new_name*/) const {
+    return nullptr;
+  }
 
  private:
-  std::string m_name;
+  const std::string m_name;
+  Kind m_kind;
+};
+
+/**
+ * In certain cases, a pass will need to operate on a fragment of code (e.g. a
+ * package or a class prefix), either without requiring knowledge from the other
+ * packages or not committing any changes. PartialPasses will be added a
+ * `run_on_packages` config option automatically and this base class takes care
+ * of building class scopes based on known DexStore names. If the
+ * `run_on_packages` config is an empty set of class prefixes, the pass will
+ * operate on the entire program.
+ */
+
+class PartialPass : public Pass {
+ public:
+  explicit PartialPass(const ::std::string& name) : Pass(name) {}
+  void bind_config() final {
+    bind("run_on_packages", {}, m_select_packages);
+    bind_partial_pass_config();
+  }
+  virtual void bind_partial_pass_config() {}
+
+  void run_pass(DexStoresVector& whole_program_stores,
+                ConfigFiles& conf,
+                PassManager& mgr) final;
+
+  virtual void run_partial_pass(DexStoresVector& whole_program_stores,
+                                Scope current_scope,
+                                ConfigFiles& conf,
+                                PassManager& mgr) = 0;
+
+ protected:
+  Scope build_class_scope_with_packages_config(const DexStoresVector& stores);
+
+ private:
+  std::unordered_set<std::string> m_select_packages;
 };

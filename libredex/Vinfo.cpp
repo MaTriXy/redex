@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "Vinfo.h"
@@ -23,17 +21,18 @@ using vinfos_t = Vinfo::vinfos_t;
 void build_vinfos_for_meth(vinfos_t& vinfos, const DexMethod* meth) {
   // Get super method
   auto cls = type_class(meth->get_class());
-  const DexMethod* super_meth = cls == nullptr ? nullptr :
-      resolve_virtual(type_class(cls->get_super_class()),
-          meth->get_name(), meth->get_proto());
+  const DexMethod* super_meth =
+      cls == nullptr ? nullptr
+                     : resolve_virtual(type_class(cls->get_super_class()),
+                                       meth->get_name(), meth->get_proto());
   // If we have a super method, we're an override, and it's overriden
   if (super_meth) {
     vinfos[meth].override_of = super_meth;
     vinfos[super_meth].overriden_by.insert(meth);
     vinfos[super_meth].is_overriden = true;
   }
-  const DexMethod* decl = find_top_impl(
-      cls, meth->get_name(), meth->get_proto());
+  const DexMethod* decl =
+      find_top_impl(cls, meth->get_name(), meth->get_proto());
   vinfos[meth].decl = decl;
 }
 
@@ -55,26 +54,26 @@ Vinfo::Vinfo(const std::vector<DexClass*>& scope) {
 }
 
 const DexMethod* Vinfo::get_decl(const DexMethod* meth) {
-  assert(m_vinfos.find(meth) != m_vinfos.end());
+  redex_assert(std::as_const(m_vinfos).find(meth) != m_vinfos.cend());
   return m_vinfos[meth].decl;
 }
 
 bool Vinfo::is_override(const DexMethod* meth) {
-  assert(m_vinfos.find(meth) != m_vinfos.end());
+  redex_assert(std::as_const(m_vinfos).find(meth) != m_vinfos.cend());
   return m_vinfos[meth].override_of;
 }
 
 const DexMethod* Vinfo::get_overriden_method(const DexMethod* meth) {
-  assert(m_vinfos.find(meth) != m_vinfos.end());
+  redex_assert(std::as_const(m_vinfos).find(meth) != m_vinfos.cend());
   return m_vinfos[meth].override_of;
 }
 
 bool Vinfo::is_overriden(const DexMethod* meth) {
-  assert(m_vinfos.find(meth) != m_vinfos.end());
+  redex_assert(std::as_const(m_vinfos).find(meth) != m_vinfos.cend());
   return m_vinfos[meth].is_overriden;
 }
 
 const methods_t& Vinfo::get_override_methods(const DexMethod* meth) {
-  assert(m_vinfos.find(meth) != m_vinfos.end());
+  redex_assert(std::as_const(m_vinfos).find(meth) != m_vinfos.cend());
   return m_vinfos[meth].overriden_by;
 }

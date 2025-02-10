@@ -1,16 +1,14 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <cstdio>
-#include <cstring>
 #include <cstdlib>
 #include <getopt.h>
+#include <regex>
 
 #include "DexCommon.h"
 
@@ -22,24 +20,19 @@ int main(int argc, char* argv[]) {
   bool files_only = false;
   char c;
   static const struct option options[] = {
-    { "files-without-match", no_argument, nullptr, 'l' },
+      {"files-without-match", no_argument, nullptr, 'l'},
   };
-  while ((c = getopt_long(
-            argc,
-            argv,
-            "hl",
-            &options[0],
-            nullptr)) != -1) {
+  while ((c = getopt_long(argc, argv, "hl", &options[0], nullptr)) != -1) {
     switch (c) {
-      case 'l':
-        files_only = true;
-        break;
-      case 'h':
-        print_usage();
-        return 0;
-      default:
-        print_usage();
-        return 1;
+    case 'l':
+      files_only = true;
+      break;
+    case 'h':
+      print_usage();
+      return 0;
+    default:
+      print_usage();
+      return 1;
     }
   }
 
@@ -50,6 +43,7 @@ int main(int argc, char* argv[]) {
   }
 
   const char* search_str = argv[optind];
+  std::regex re(search_str);
 
   for (int i = optind + 1; i < argc; ++i) {
     const char* dexfile = argv[i];
@@ -60,7 +54,7 @@ int main(int argc, char* argv[]) {
     for (uint32_t j = 0; j < size; j++) {
       dex_class_def* cls_def = rd.dex_class_defs + j;
       char* name = dex_string_by_type_idx(&rd, cls_def->typeidx);
-      if (strstr(name, search_str) != nullptr) {
+      if (std::regex_search(name, re)) {
         if (files_only) {
           printf("%s\n", dexfile);
         } else {

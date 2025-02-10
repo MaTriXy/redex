@@ -1,19 +1,31 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "InstructionLowering.h"
-#include "Walkers.h"
 
-#include "boost/algorithm/string/join.hpp"
-#include "boost/range/adaptors.hpp"
+#include "ConfigFiles.h"
+#include "Debug.h"
+#include "DexInstruction.h"
+#include "DexOpcodeDefs.h"
+#include "DexStore.h"
+#include "IRInstruction.h"
+#include "MethodProfiles.h"
+#include "Show.h"
+#include "Walkers.h"
+#include <array>
+#include <optional>
 
 namespace instruction_lowering {
+
+namespace {
+
+constexpr double kSparseSwitchHotMethodAppearThreshold = 0.0;
+
+} // namespace
 
 /*
  * Returns whether the given value can fit in an integer of :width bits.
@@ -21,7 +33,7 @@ namespace instruction_lowering {
 template <int width>
 static bool signed_int_fits(int64_t v) {
   auto shift = 64 - width;
-  return (v << shift >> shift) == v;
+  return int64_t(uint64_t(v) << shift) >> shift == v;
 }
 
 /*
@@ -34,7 +46,7 @@ template <int total_width>
 static bool signed_int_fits_high16(int64_t v) {
   auto right_zeros = total_width - 16;
   auto left_ones = 64 - total_width;
-  return v >> right_zeros << (64 - 16) >> left_ones == v;
+  return int64_t(uint64_t(v >> right_zeros) << (64 - 16)) >> left_ones == v;
 }
 
 /*
@@ -53,8 +65,7 @@ static std::array<DexOpcode, 3> move_opcode_tuple(IROpcode op) {
     return {
         {DOPCODE_MOVE_WIDE, DOPCODE_MOVE_WIDE_FROM16, DOPCODE_MOVE_WIDE_16}};
   case OPCODE_MOVE_OBJECT:
-    return {{DOPCODE_MOVE_OBJECT,
-             DOPCODE_MOVE_OBJECT_FROM16,
+    return {{DOPCODE_MOVE_OBJECT, DOPCODE_MOVE_OBJECT_FROM16,
              DOPCODE_MOVE_OBJECT_16}};
   default:
     not_reached();
@@ -113,64 +124,48 @@ DexOpcode select_binop_lit_opcode(const IRInstruction* insn) {
   auto literal = insn->get_literal();
   if (signed_int_fits<8>(literal)) { // lit8 -> literal is 8 bits
     switch (op) {
-    case OPCODE_ADD_INT_LIT8:
-    case OPCODE_ADD_INT_LIT16:
+    case OPCODE_ADD_INT_LIT:
       return DOPCODE_ADD_INT_LIT8;
-    case OPCODE_RSUB_INT_LIT8:
-    case OPCODE_RSUB_INT:
+    case OPCODE_RSUB_INT_LIT:
       return DOPCODE_RSUB_INT_LIT8;
-    case OPCODE_MUL_INT_LIT8:
-    case OPCODE_MUL_INT_LIT16:
+    case OPCODE_MUL_INT_LIT:
       return DOPCODE_MUL_INT_LIT8;
-    case OPCODE_DIV_INT_LIT8:
-    case OPCODE_DIV_INT_LIT16:
+    case OPCODE_DIV_INT_LIT:
       return DOPCODE_DIV_INT_LIT8;
-    case OPCODE_REM_INT_LIT8:
-    case OPCODE_REM_INT_LIT16:
+    case OPCODE_REM_INT_LIT:
       return DOPCODE_REM_INT_LIT8;
-    case OPCODE_AND_INT_LIT8:
-    case OPCODE_AND_INT_LIT16:
+    case OPCODE_AND_INT_LIT:
       return DOPCODE_AND_INT_LIT8;
-    case OPCODE_OR_INT_LIT8:
-    case OPCODE_OR_INT_LIT16:
+    case OPCODE_OR_INT_LIT:
       return DOPCODE_OR_INT_LIT8;
-    case OPCODE_XOR_INT_LIT8:
-    case OPCODE_XOR_INT_LIT16:
+    case OPCODE_XOR_INT_LIT:
       return DOPCODE_XOR_INT_LIT8;
-    case OPCODE_SHL_INT_LIT8:
+    case OPCODE_SHL_INT_LIT:
       return DOPCODE_SHL_INT_LIT8;
-    case OPCODE_SHR_INT_LIT8:
+    case OPCODE_SHR_INT_LIT:
       return DOPCODE_SHR_INT_LIT8;
-    case OPCODE_USHR_INT_LIT8:
+    case OPCODE_USHR_INT_LIT:
       return DOPCODE_USHR_INT_LIT8;
     default:
       not_reached();
     }
   } else if (signed_int_fits<16>(literal)) { // lit16 -> literal is 16 bits
     switch (op) {
-    case OPCODE_ADD_INT_LIT8:
-    case OPCODE_ADD_INT_LIT16:
+    case OPCODE_ADD_INT_LIT:
       return DOPCODE_ADD_INT_LIT16;
-    case OPCODE_RSUB_INT_LIT8:
-    case OPCODE_RSUB_INT:
+    case OPCODE_RSUB_INT_LIT:
       return DOPCODE_RSUB_INT;
-    case OPCODE_MUL_INT_LIT8:
-    case OPCODE_MUL_INT_LIT16:
+    case OPCODE_MUL_INT_LIT:
       return DOPCODE_MUL_INT_LIT16;
-    case OPCODE_DIV_INT_LIT8:
-    case OPCODE_DIV_INT_LIT16:
+    case OPCODE_DIV_INT_LIT:
       return DOPCODE_DIV_INT_LIT16;
-    case OPCODE_REM_INT_LIT8:
-    case OPCODE_REM_INT_LIT16:
+    case OPCODE_REM_INT_LIT:
       return DOPCODE_REM_INT_LIT16;
-    case OPCODE_AND_INT_LIT8:
-    case OPCODE_AND_INT_LIT16:
+    case OPCODE_AND_INT_LIT:
       return DOPCODE_AND_INT_LIT16;
-    case OPCODE_OR_INT_LIT8:
-    case OPCODE_OR_INT_LIT16:
+    case OPCODE_OR_INT_LIT:
       return DOPCODE_OR_INT_LIT16;
-    case OPCODE_XOR_INT_LIT8:
-    case OPCODE_XOR_INT_LIT16:
+    case OPCODE_XOR_INT_LIT:
       return DOPCODE_XOR_INT_LIT16;
     default:
       not_reached();
@@ -180,6 +175,12 @@ DexOpcode select_binop_lit_opcode(const IRInstruction* insn) {
     always_assert_log(
         false, "binop_lit doesn't support literals greater than 16 bits");
   }
+}
+
+static DexOpcode convert_3to2addr(DexOpcode op) {
+  always_assert(op >= DOPCODE_ADD_INT && op <= DOPCODE_REM_DOUBLE);
+  constexpr uint16_t offset = DOPCODE_ADD_INT_2ADDR - DOPCODE_ADD_INT;
+  return static_cast<DexOpcode>(op + offset);
 }
 
 bool try_2addr_conversion(MethodItemEntry* mie) {
@@ -210,49 +211,46 @@ bool try_2addr_conversion(MethodItemEntry* mie) {
 
 using namespace impl;
 
+namespace {
+
 /*
  * Checks that the load-param opcodes are consistent with the method prototype.
  */
-static void check_load_params(DexMethod* method) {
+void check_load_params(DexMethod* method) {
   auto* code = method->get_code();
   auto params = code->get_param_instructions();
   auto param_ops = InstructionIterable(params);
   if (param_ops.empty()) {
     return;
   }
-  auto& args_list = method->get_proto()->get_args()->get_type_list();
+  auto* args_list = method->get_proto()->get_args();
   auto it = param_ops.begin();
   auto end = param_ops.end();
-  uint16_t next_ins = it->insn->dest();
+  reg_t next_ins = it->insn->dest();
   if (!is_static(method)) {
     auto op = it->insn->opcode();
     always_assert(op == IOPCODE_LOAD_PARAM_OBJECT);
-    it.reset(code->erase(it.unwrap()));
+    it.reset(code->erase_and_dispose(it.unwrap()));
     ++next_ins;
   }
-  auto args_it = args_list.begin();
+  auto args_it = args_list->begin();
   for (; it != end; ++it) {
     auto op = it->insn->opcode();
     // check that the param registers are contiguous
     always_assert(next_ins == it->insn->dest());
     // TODO: have load param opcodes store the actual type of the param and
     // check that they match the method prototype here
-    always_assert(args_it != args_list.end());
-    if (is_wide_type(*args_it)) {
-      always_assert(op == IOPCODE_LOAD_PARAM_WIDE);
-    } else if (is_primitive(*args_it)) {
-      always_assert(op == IOPCODE_LOAD_PARAM);
-    } else {
-      always_assert(op == IOPCODE_LOAD_PARAM_OBJECT);
-    }
+    always_assert(args_it != args_list->end());
+    auto expected_op = opcode::load_opcode(*args_it);
+    always_assert(op == expected_op);
     ++args_it;
     next_ins += it->insn->dest_is_wide() ? 2 : 1;
   }
-  always_assert(args_it == args_list.end());
+  always_assert(args_it == args_list->end());
   // check that the params are at the end of the frame
   for (auto& mie : InstructionIterable(code)) {
     auto insn = mie.insn;
-    if (insn->dests_size()) {
+    if (insn->has_dest()) {
       always_assert_log(insn->dest() < next_ins,
                         "Instruction %s refers to a register (v%u) >= size (%u)"
                         "in method %s\n",
@@ -273,7 +271,24 @@ static void check_load_params(DexMethod* method) {
   }
 }
 
-static DexInstruction* create_dex_instruction(const IRInstruction* insn) {
+DexInstruction* create_dex_instruction(const IRInstruction* insn) {
+  // TODO: Assert that this never happens. IOPCODE_INIT_CLASS should never make
+  // it here.
+  if (insn->opcode() == IOPCODE_INIT_CLASS) {
+    return new DexInstruction(DOPCODE_NOP);
+  }
+  // TODO: Assert that this never happens. IOPCODE_INJECTION_ID should never
+  // make it here.
+  if (insn->opcode() == IOPCODE_INJECTION_ID) {
+    return new DexInstruction(DOPCODE_CONST);
+  }
+  // TODO: Assert that this never happens. IOPCODE_UNREACHABLE should never
+  // make it here.
+  if (insn->opcode() == IOPCODE_UNREACHABLE) {
+    return new DexInstruction(DOPCODE_CONST);
+  }
+  always_assert(insn->opcode() != IOPCODE_WRITE_BARRIER);
+
   auto op = opcode::to_dex_opcode(insn->opcode());
   switch (opcode::ref(insn->opcode())) {
   case opcode::Ref::None:
@@ -289,6 +304,12 @@ static DexInstruction* create_dex_instruction(const IRInstruction* insn) {
     return new DexOpcodeField(op, insn->get_field());
   case opcode::Ref::Method:
     return new DexOpcodeMethod(op, insn->get_method());
+  case opcode::Ref::CallSite:
+    return new DexOpcodeCallSite(op, insn->get_callsite());
+  case opcode::Ref::MethodHandle:
+    return new DexOpcodeMethodHandle(op, insn->get_methodhandle());
+  case opcode::Ref::Proto:
+    return new DexOpcodeProto(op, insn->get_proto());
   }
 }
 
@@ -296,8 +317,8 @@ static DexInstruction* create_dex_instruction(const IRInstruction* insn) {
 // instructions in isolation -- it only removes them when the caller calls it
 // with the associated 'primary' prefix instruction -- so we use this function
 // specifically for this purpose.
-static void remove_move_result_pseudo(IRList::iterator it) {
-  always_assert(opcode::is_move_result_pseudo(it->insn->opcode()));
+void remove_move_result_pseudo(const IRList::iterator& it) {
+  always_assert(opcode::is_a_move_result_pseudo(it->insn->opcode()));
   delete it->insn;
   it->insn = nullptr;
   it->type = MFLOW_FALLTHROUGH;
@@ -307,9 +328,7 @@ static void remove_move_result_pseudo(IRList::iterator it) {
  * Returns the number of DexInstructions added during lowering (not including
  * the check-cast).
  */
-static size_t lower_check_cast(DexMethod*,
-                               IRCode* code,
-                               IRList::iterator* it_) {
+size_t lower_check_cast(DexMethod*, IRCode* code, IRList::iterator* it_) {
   auto& it = *it_;
   const auto* insn = it->insn;
   size_t extra_instructions{0};
@@ -337,33 +356,26 @@ static size_t lower_check_cast(DexMethod*,
   return extra_instructions;
 }
 
-static void lower_fill_array_data(DexMethod*,
-                                  IRCode* code,
-                                  IRList::iterator it) {
+void lower_fill_array_data(DexMethod*, IRCode* code, IRList::iterator* it_) {
+  auto& it = *it_;
   const auto* insn = it->insn;
   auto* dex_insn = new DexInstruction(DOPCODE_FILL_ARRAY_DATA);
   dex_insn->set_src(0, insn->src(0));
   auto* bt = new BranchTarget(&*it);
   code->push_back(bt);
-  code->push_back(insn->get_data());
+  code->push_back(insn->get_data()->clone());
   it->replace_ir_with_dex(dex_insn);
 }
 
-static void lower_to_range_instruction(DexMethod* method,
-                                       IRCode* code,
-                                       IRList::iterator* it_) {
-  using boost::adaptors::transformed;
-  using boost::algorithm::join;
+void lower_to_range_instruction(DexMethod* method,
+                                IRCode* code,
+                                IRList::iterator* it_) {
   auto& it = *it_;
   const auto* insn = it->insn;
   always_assert_log(
-      has_contiguous_srcs(insn),
-      "Instruction %s has non-contiguous srcs (%s) in method "
-      "%s.\nContext:\n%s\n",
+      insn->has_contiguous_range_srcs_denormalized(),
+      "Instruction %s has non-contiguous srcs in method %s.\nContext:\n%s\n",
       SHOW(insn),
-      join(insn->srcs() | transformed((std::string(*)(int))std::to_string),
-           ", ")
-          .c_str(),
       SHOW(method),
       SHOW_CONTEXT(code, insn));
   auto* dex_insn = create_dex_instruction(insn);
@@ -373,24 +385,22 @@ static void lower_to_range_instruction(DexMethod* method,
   it->replace_ir_with_dex(dex_insn);
 }
 
-static void lower_simple_instruction(DexMethod*,
-                                     IRCode*,
-                                     IRList::iterator* it_) {
+void lower_simple_instruction(DexMethod*, IRCode*, IRList::iterator* it_) {
   auto& it = *it_;
   const auto* insn = it->insn;
   auto op = insn->opcode();
 
   DexInstruction* dex_insn;
-  if (is_move(op)) {
+  if (opcode::is_a_move(op)) {
     dex_insn = new DexInstruction(select_move_opcode(insn));
   } else if (op >= OPCODE_CONST && op <= OPCODE_CONST_WIDE) {
     dex_insn = new DexInstruction(select_const_opcode(insn));
-  } else if (op >= OPCODE_ADD_INT_LIT16 && op <= OPCODE_USHR_INT_LIT8) {
+  } else if (op >= OPCODE_ADD_INT_LIT && op <= OPCODE_USHR_INT_LIT) {
     dex_insn = new DexInstruction(select_binop_lit_opcode(insn));
   } else {
     dex_insn = create_dex_instruction(insn);
   }
-  if (insn->dests_size()) {
+  if (insn->has_dest()) {
     dex_insn->set_dest(insn->dest());
   } else if (insn->has_move_result_pseudo()) {
     dex_insn->set_dest(ir_list::move_result_pseudo_of(it)->dest());
@@ -405,36 +415,113 @@ static void lower_simple_instruction(DexMethod*,
   if (dex_opcode::has_arg_word_count(dex_op)) {
     dex_insn->set_arg_word_count(insn->srcs_size());
   }
+  auto has_move_result_pseudo = insn->has_move_result_pseudo();
   it->replace_ir_with_dex(dex_insn);
-  if (insn->has_move_result_pseudo()) {
+  if (has_move_result_pseudo) {
     remove_move_result_pseudo(++it);
   }
 }
 
-Stats lower(DexMethod* method) {
+} // namespace
+
+Stats lower(DexMethod* method, bool lower_with_cfg, ConfigFiles* conf) {
   Stats stats;
   auto* code = method->get_code();
   always_assert(code != nullptr);
+
+  // There's a bug in dex2oat (version 6.0.0_r1) that generates bogus machine
+  // code when there is an empty block (a block with only a goto in it). To
+  // avoid this bug, we use the CFG to remove empty blocks.
+  if (lower_with_cfg) {
+    code->build_cfg(/* editable */ true);
+    code->clear_cfg();
+  }
+
   // Check the load-param opcodes make sense before removing them
   check_load_params(method);
-  for (auto it = code->begin(); it != code->end(); ++it) {
+
+  std::unordered_map<MethodItemEntry*, std::vector<int32_t>> case_keys;
+  for (const MethodItemEntry& it : *code) {
+    if (it.type == MFLOW_TARGET) {
+      BranchTarget* bt = it.target;
+      if (bt->type == BRANCH_MULTI) {
+        case_keys[bt->src].push_back(bt->case_key);
+      }
+    }
+  }
+  for (auto& entry : case_keys) {
+    std::sort(entry.second.begin(), entry.second.end());
+  }
+
+  // Remove any source blocks. We do not need or handle them in dex code.
+  // Pre-loop in case the head is a source block;
+  auto code_begin = code->begin();
+  while (code_begin != code->end() && code_begin->type == MFLOW_SOURCE_BLOCK) {
+    code->erase_and_dispose(code_begin);
+    code_begin = code->begin();
+  }
+
+  std::optional<bool> method_is_hot = std::nullopt;
+
+  for (auto it = code_begin; it != code->end(); ++it) {
     if (it->type != MFLOW_OPCODE) {
+      // Remove any source blocks. They are no longer necessary and slow down
+      // iteration.
+      if (it->type == MFLOW_SOURCE_BLOCK) {
+        redex_assert(it != code->cbegin());
+        auto prev = std::prev(it);
+        code->erase_and_dispose(it);
+        it = prev;
+      }
+
       continue;
     }
     auto* insn = it->insn;
     auto op = insn->opcode();
     insn->denormalize_registers();
 
-    if (opcode::is_load_param(op)) {
+    if (opcode::is_a_load_param(op)) {
       code->remove_opcode(it);
     } else if (op == OPCODE_CHECK_CAST) {
       stats.move_for_check_cast += lower_check_cast(method, code, &it);
     } else if (op == OPCODE_FILL_ARRAY_DATA) {
-      lower_fill_array_data(method, code, it);
+      lower_fill_array_data(method, code, &it);
     } else if (needs_range_conversion(insn)) {
       lower_to_range_instruction(method, code, &it);
     } else {
       lower_simple_instruction(method, code, &it);
+    }
+
+    // Overwrite the switch dex opcode with the correct type, depending on how
+    // its cases are laid out.
+    if (op == OPCODE_SWITCH) {
+      const auto& keys = case_keys.at(&*it);
+      DexOpcode dop = CaseKeysExtent::from_ordered(keys).sufficiently_sparse()
+                          ? DOPCODE_SPARSE_SWITCH
+                          : DOPCODE_PACKED_SWITCH;
+      it->dex_insn->set_opcode(dop);
+      if (dop == DexOpcode::DOPCODE_SPARSE_SWITCH) {
+        if (!method_is_hot) {
+          if (conf != nullptr) {
+            method_is_hot = [&]() {
+              for (auto& p : conf->get_method_profiles().all_interactions()) {
+                auto it = p.second.find(method);
+                if (it != p.second.end() &&
+                    it->second.appear_percent >
+                        kSparseSwitchHotMethodAppearThreshold) {
+                  return true;
+                }
+              }
+              return false;
+            }();
+          } else {
+            method_is_hot = false;
+          }
+        }
+
+        Stats::SparseSwitches::Data data(1, (*method_is_hot) ? 1 : 0);
+        stats.sparse_switches.data[keys.size()] += data;
+      }
     }
   }
   for (auto it = code->begin(); it != code->end(); ++it) {
@@ -447,24 +534,72 @@ Stats lower(DexMethod* method) {
   return stats;
 }
 
-Stats run(DexStoresVector& stores) {
-  using Data = std::nullptr_t;
+Stats run(DexStoresVector& stores, bool lower_with_cfg, ConfigFiles* conf) {
   auto scope = build_class_scope(stores);
-  return walk::parallel::reduce_methods<Data, Stats>(
-      scope,
-      [](Data&, DexMethod* m) {
-        Stats stats;
-        if (m->get_code() == nullptr) {
-          return stats;
-        }
-        stats.accumulate(lower(m));
-        return stats;
-      },
-      [](Stats a, Stats b) {
-        a.accumulate(b);
-        return a;
-      },
-      [&](unsigned int) { return nullptr; });
+  return walk::parallel::methods<Stats>(scope,
+                                        [lower_with_cfg, conf](DexMethod* m) {
+                                          Stats stats;
+                                          if (m->get_code() == nullptr) {
+                                            return stats;
+                                          }
+                                          return lower(m, lower_with_cfg, conf);
+                                        });
+}
+
+CaseKeysExtent CaseKeysExtent::from_ordered(
+    const std::vector<int32_t>& case_keys) {
+  always_assert(!case_keys.empty());
+  always_assert(case_keys.front() <= case_keys.back());
+  return CaseKeysExtent{case_keys.front(), case_keys.back(),
+                        (uint32_t)case_keys.size()};
+}
+
+// Computes number of entries needed for a packed switch, accounting for any
+// holes that might exist
+uint64_t CaseKeysExtent::get_packed_switch_size() const {
+  always_assert(first_key <= last_key);
+  always_assert(size > 0);
+  return (uint64_t)((int64_t)last_key - first_key + 1);
+}
+
+// Whether a sparse switch statement will be more compact than a packed switch
+bool CaseKeysExtent::sufficiently_sparse() const {
+  uint64_t packed_switch_size = get_packed_switch_size();
+  // packed switches must have less than 2^16 entries, and
+  // sparse switches pay off once there are more holes than entries
+  return packed_switch_size > std::numeric_limits<uint16_t>::max() ||
+         packed_switch_size / 2 > size;
+}
+
+uint32_t CaseKeysExtent::estimate_switch_payload_code_units() const {
+  if (sufficiently_sparse()) {
+    // sparse-switch-payload
+    return 2 + 4 * size;
+  } else {
+    // packed-switch-payload
+    const uint64_t packed_switch_size = get_packed_switch_size();
+    return 4 + packed_switch_size * 2;
+  }
+}
+
+void CaseKeysExtentBuilder::insert(int32_t case_key) {
+  if (!m_info) {
+    m_info = (CaseKeysExtent){case_key, case_key, 1};
+    return;
+  }
+  m_info->first_key = std::min(m_info->first_key, case_key);
+  m_info->last_key = std::max(m_info->last_key, case_key);
+  m_info->size++;
+}
+
+const CaseKeysExtent& CaseKeysExtentBuilder::operator*() const {
+  always_assert(m_info);
+  return *m_info;
+}
+
+const CaseKeysExtent* CaseKeysExtentBuilder::operator->() const {
+  always_assert(m_info);
+  return &*m_info;
 }
 
 } // namespace instruction_lowering

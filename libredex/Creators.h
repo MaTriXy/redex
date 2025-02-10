@@ -1,17 +1,17 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include <vector>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
+#include "DexAnnotation.h"
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "IRCode.h"
@@ -41,7 +41,7 @@ struct Location {
   bool is_wide() const { return loc_size(type) == 2; }
 
   bool is_ref() const {
-    char t = type_shorty(type);
+    char t = type::type_shorty(type);
     return t == 'L' || t == '[';
   }
 
@@ -56,25 +56,30 @@ struct Location {
   int get_reg() const { return reg; }
 
   static Location& empty() {
-    static Location empty_loc(get_void_type(), 0);
+    static Location empty_loc(type::_void(), 0);
     return empty_loc;
   }
+
+  Location(const Location&) = default;
+  Location(Location&&) noexcept = default;
+
+  Location& operator=(const Location&) = default;
+  Location& operator=(Location&&) = default;
 
  private:
   /**
    * Size of this location.
    */
   static uint16_t loc_size(DexType* type) {
-    char t = type_shorty(type);
-    always_assert(type != get_void_type());
+    char t = type::type_shorty(type);
+    always_assert(type != type::_void());
     return t == 'J' || t == 'D' ? 2 : 1;
   }
 
- private:
-  Location(DexType* t, int pos) : type(t), reg(pos) {}
+  Location(DexType* t, reg_t pos) : type(t), reg(pos) {}
 
   DexType* type;
-  uint16_t reg;
+  reg_t reg;
 
   friend struct MethodBlock;
   friend struct MethodCreator;
@@ -118,6 +123,11 @@ struct MethodBlock {
   void new_instance(DexType* type, Location& dst);
 
   /**
+   * new-array; instatiate an array 'type' of 'size' into dst location.
+   */
+  void new_array(DexType* type, const Location& size, const Location& dst);
+
+  /**
    * throw; throw ex object at Location
    */
   void throwex(Location ex);
@@ -132,7 +142,7 @@ struct MethodBlock {
    * Instance field setter.
    * The field must be a field def.
    */
-  void iput(DexField* field, Location self, Location src);
+  void iput(DexField* field, Location obj, Location src);
 
   /**
    * Instance field opcode.
@@ -183,7 +193,6 @@ struct MethodBlock {
    */
   void check_cast(Location& src_and_dst, DexType* type);
 
-
   void instance_of(Location& obj, Location& dst, DexType* type);
 
   /**
@@ -208,6 +217,12 @@ struct MethodBlock {
   void load_const(Location& loc, int32_t value);
 
   /**
+   * Load an int32 or int64 constant into the given Location.
+   * The Location must be compatible with the given type.
+   */
+  void load_const(Location& loc, int64_t value, DexType* type);
+
+  /**
    * Load the double value into the given Location.
    * The Location must be compatible with the given type.
    */
@@ -217,7 +232,7 @@ struct MethodBlock {
    * Load the string value into the given Location.
    * The Location must be compatible with the given type.
    */
-  void load_const(Location& loc, DexString* value);
+  void load_const(Location& loc, const DexString* value);
 
   /**
    * Load the type value into the given Location.
@@ -233,14 +248,15 @@ struct MethodBlock {
   // Helper
   void init_loc(Location& loc);
 
-  void binop_lit16(IROpcode op,
-                   const Location& dest,
-                   const Location& src,
-                   int16_t literal);
-  void binop_lit8(IROpcode op,
-                  const Location& dest,
-                  const Location& src,
-                  int8_t literal);
+  void binop(IROpcode op,
+             const Location& dest,
+             const Location& src0,
+             const Location& src1);
+
+  void binop_lit(IROpcode op,
+                 const Location& dest,
+                 const Location& src,
+                 int16_t literal);
 
   //
   // branch instruction
@@ -341,8 +357,12 @@ struct MethodBlock {
   MethodBlock* switch_op(Location test,
                          std::map<SwitchIndices, MethodBlock*>& cases);
 
+  void push_position(std::unique_ptr<DexPosition> pos);
+
+  void push_source_block(std::unique_ptr<SourceBlock> sb);
+
  private:
-  MethodBlock(IRList::iterator iterator, MethodCreator* creator);
+  MethodBlock(const IRList::iterator& iterator, MethodCreator* creator);
 
   //
   // Helpers
@@ -350,11 +370,11 @@ struct MethodBlock {
 
   void push_instruction(IRInstruction* insn);
   MethodBlock* make_if_block(IRInstruction* insn);
-  MethodBlock* make_if_else_block(IRInstruction* insn, MethodBlock** true_block);
+  MethodBlock* make_if_else_block(IRInstruction* insn,
+                                  MethodBlock** true_block);
   MethodBlock* make_switch_block(IRInstruction* insn,
                                  std::map<SwitchIndices, MethodBlock*>& cases);
 
- private:
   MethodCreator* mc;
   // A MethodBlock is simply an iterator over an IRList used to emit
   // instructions
@@ -375,12 +395,20 @@ struct MethodBlock {
  */
 struct MethodCreator {
  public:
-  MethodCreator(DexMethod* meth);
+  explicit MethodCreator(DexMethod* meth);
+  MethodCreator(DexMethodRef* ref,
+                DexAccessFlags access,
+                std::unique_ptr<DexAnnotationSet> anno = nullptr,
+                bool with_debug_item = true);
   MethodCreator(DexType* cls,
-                DexString* name,
+                const DexString* name,
                 DexProto* proto,
                 DexAccessFlags access,
-                DexAnnotationSet* anno = nullptr);
+                std::unique_ptr<DexAnnotationSet> anno = nullptr,
+                bool with_debug_item = true);
+
+  MethodCreator(MethodCreator&&) noexcept = default;
+  MethodCreator& operator=(MethodCreator&&) noexcept = default;
 
   /**
    * Get an existing local.
@@ -390,13 +418,14 @@ struct MethodCreator {
     return locals.at(i);
   }
 
+  std::vector<Location> get_reg_args();
+
   /**
    * Make a new local of the given type.
    */
   Location make_local(DexType* type) {
     auto next_reg = meth_code->get_registers_size();
-    Location local{type, next_reg};
-    locals.push_back(std::move(local));
+    locals.emplace_back(Location{type, next_reg});
     meth_code->set_registers_size(next_reg + Location::loc_size(type));
     return locals.back();
   }
@@ -411,7 +440,11 @@ struct MethodCreator {
    */
   DexMethod* create();
 
- public:
+  /**
+   * Returns the method-ref for the method that is being created.
+   */
+  DexMethodRef* get_method() const { return method; }
+
   /**
    * Transfer code from a given method to a static with the same signature
    * in the given class.
@@ -425,7 +458,7 @@ struct MethodCreator {
    * Same as make_static_from(DexMethod*, DexClass*); but create a method
    * with the given name.
    */
-  static DexMethod* make_static_from(DexString* name,
+  static DexMethod* make_static_from(const DexString* name,
                                      DexMethod* meth,
                                      DexClass* target_cls);
 
@@ -434,7 +467,7 @@ struct MethodCreator {
    * with the given name and the given proto.
    * The proto provided must be compatible with the code in meth.
    */
-  static DexMethod* make_static_from(DexString* name,
+  static DexMethod* make_static_from(const DexString* name,
                                      DexProto* proto,
                                      DexMethod* meth,
                                      DexClass* target_cls);
@@ -446,32 +479,38 @@ struct MethodCreator {
 
   void load_locals(DexMethod* meth);
 
-  Location make_local_at(DexType* type, int i) {
+  Location make_local_at(DexType* type, reg_t i) {
     always_assert(i < meth_code->get_registers_size());
-    Location local{type, i};
-    locals.push_back(std::move(local));
+    locals.emplace_back(Location{type, i});
     return locals.back();
   }
 
-  IRList::iterator push_instruction(IRList::iterator curr, IRInstruction* insn);
+  IRList::iterator push_instruction(const IRList::iterator& curr,
+                                    IRInstruction* insn);
+  IRList::iterator push_position(const IRList::iterator& curr,
+                                 std::unique_ptr<DexPosition> pos);
+  IRList::iterator push_source_block(const IRList::iterator& curr,
+                                     std::unique_ptr<SourceBlock> sb);
   IRList::iterator make_if_block(IRList::iterator curr,
-                                    IRInstruction* insn,
-                                    IRList::iterator* false_block);
+                                 IRInstruction* insn,
+                                 IRList::iterator* false_block);
   IRList::iterator make_if_else_block(IRList::iterator curr,
-                                         IRInstruction* insn,
-                                         IRList::iterator* false_block,
-                                         IRList::iterator* true_block);
+                                      IRInstruction* insn,
+                                      IRList::iterator* false_block,
+                                      IRList::iterator* true_block);
   IRList::iterator make_switch_block(
       IRList::iterator curr,
-      IRInstruction* opcode,
+      IRInstruction* insn,
       IRList::iterator* default_block,
       std::map<SwitchIndices, IRList::iterator>& cases);
 
- private:
   DexMethod* method;
   IRCode* meth_code;
   std::vector<Location> locals;
+  std::vector<std::unique_ptr<MethodBlock>> blocks;
+  // The main block should also be in `blocks` and is owned there.
   MethodBlock* main_block;
+  bool m_with_debug_item;
 
   friend std::string show(const MethodCreator*);
   friend struct MethodBlock;
@@ -482,32 +521,22 @@ struct MethodCreator {
  * Once create is called this creator should not be used any longer.
  */
 struct ClassCreator {
-  explicit ClassCreator(DexType* type) {
-    always_assert_log(type_class(type) == nullptr,
-        "class already exists for %s\n", SHOW(type));
-    m_cls = new DexClass();
-    m_cls->m_self = type;
-    m_cls->m_access_flags = (DexAccessFlags)0;
-    m_cls->m_super_class = nullptr;
-    m_cls->m_interfaces = DexTypeList::make_type_list({});
-    m_cls->m_source_file = nullptr;
-    m_cls->m_anno = nullptr;
-    m_cls->m_external = false;
+  explicit ClassCreator(DexType* type, const DexLocation* location = nullptr) {
+    if (location == nullptr) {
+      location = DexLocation::make_location("", "");
+    }
+    m_cls = std::unique_ptr<DexClass>(new DexClass(type, location));
   }
 
   /**
    * Return the DexClass associated with this creator.
    */
-  DexClass* get_class() const {
-    return m_cls;
-  }
+  DexClass* get_class() const { return m_cls.get(); }
 
   /**
    * Return the DexType associated with this creator.
    */
-  DexType* get_type() const {
-    return m_cls->get_type();
-  }
+  DexType* get_type() const { return m_cls->get_type(); }
 
   /**
    * Accessibility flags
@@ -517,22 +546,18 @@ struct ClassCreator {
   /**
    * Set the parent of the DexClass to be created.
    */
-  void set_super(DexType* super) {
-    m_cls->m_super_class = super;
-  }
+  void set_super(DexType* super) { m_cls->m_super_class = super; }
 
   /**
    * Set the access flags for the DexClass to be created.
    */
-  void set_access(DexAccessFlags access) {
-    m_cls->m_access_flags = access;
-  }
+  void set_access(DexAccessFlags access) { m_cls->m_access_flags = access; }
 
   /**
    * Set the external bit for the DexClass.
    */
   void set_external() {
-    m_cls->m_deobfuscated_name = show(m_cls);
+    m_cls->set_deobfuscated_name(show_cls(m_cls.get()));
     m_cls->m_external = true;
   }
 
@@ -549,35 +574,23 @@ struct ClassCreator {
   /**
    * Add a DexField to the DexClass.
    */
-  void add_field(DexField* field) {
-    m_cls->add_field(field);
-  }
+  void add_field(DexField* field) { m_cls->add_field(field); }
 
   /**
    * Add a DexMethod to the DexClass.
    */
-  void add_method(DexMethod* method) {
-    m_cls->add_method(method);
-  }
+  void add_method(DexMethod* method) { m_cls->add_method(method); }
 
   /**
    * Create the DexClass. The creator should not be used after this call.
    */
-  DexClass* create() {
-    always_assert_log(m_cls->m_self,
-                      "Self cannot be null in a DexClass");
-    if (m_cls->m_super_class == NULL) {
-      if(m_cls->m_self != get_object_type()) {
-        always_assert_log(m_cls->m_super_class,
-                          "No supertype found for %s", SHOW(m_cls->m_self));
-      }
-    }
-    m_cls->m_interfaces = DexTypeList::make_type_list(std::move(m_interfaces));
-    g_redex->publish_class(m_cls);
-    return m_cls;
-  }
+  DexClass* create();
 
-private:
-  DexClass* m_cls;
-  std::deque<DexType*> m_interfaces;
+ private:
+  // To avoid "Show.h" in the header.
+  static std::string show_cls(const DexClass* cls);
+  static std::string show_type(const DexType* type);
+
+  std::unique_ptr<DexClass> m_cls;
+  DexTypeList::ContainerType m_interfaces;
 };

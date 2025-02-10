@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <cmath>
@@ -22,7 +20,7 @@
 #include "Liveness.h"
 #include "OpcodeList.h"
 #include "RedexTest.h"
-#include "RegAlloc.h"
+#include "RegisterAllocation.h"
 #include "RegisterType.h"
 #include "Show.h"
 #include "Transform.h"
@@ -32,11 +30,6 @@
 using namespace regalloc;
 
 struct RegAllocTest : public RedexTest {};
-
-// for nicer gtest error messages
-std::ostream& operator<<(std::ostream& os, const IRInstruction& to_show) {
-  return os << show(&to_show);
-}
 
 /*
  * Check that we pick the most pessimistic move instruction (of the right type)
@@ -60,7 +53,7 @@ TEST_F(RegAllocTest, RegTypeDestWide) {
   for (auto op : all_opcodes) {
     // We cannot create IRInstructions from these opcodes
     auto insn = std::make_unique<IRInstruction>(op);
-    if (insn->dests_size()) {
+    if (insn->has_dest()) {
       EXPECT_EQ(insn->dest_is_wide(),
                 regalloc::dest_reg_type(insn.get()) == RegisterType::WIDE)
           << "mismatch for " << show(op);
@@ -82,117 +75,6 @@ TEST_F(RegAllocTest, RegTypeInvoke) {
 
   auto static_insn = dasm(OPCODE_INVOKE_STATIC, method, {0_v});
   EXPECT_EQ(regalloc::src_reg_type(static_insn, 0), RegisterType::NORMAL);
-}
-
-TEST_F(RegAllocTest, LiveRangeSingleBlock) {
-  auto code = assembler::ircode_from_string(R"(
-    (
-     (const v0 0)
-     (new-instance "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-     (check-cast v0 "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-    )
-)");
-  code->set_registers_size(1);
-
-  code->build_cfg();
-  live_range::renumber_registers(code.get(), /* width_aware */ false);
-
-  auto expected_code = assembler::ircode_from_string(R"(
-    (
-     (const v0 0)
-     (new-instance "Ljava/lang/Object;")
-     (move-result-pseudo-object v1)
-     (check-cast v1 "Ljava/lang/Object;")
-     (move-result-pseudo-object v2)
-    )
-)");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
-  EXPECT_EQ(code->get_registers_size(), 3);
-}
-
-TEST_F(RegAllocTest, LiveRange) {
-  auto code = assembler::ircode_from_string(R"(
-    (
-     (const v0 0)
-     (new-instance "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-     (check-cast v0 "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-     (if-eq v0 v0 :if-true-label)
-
-     (const v0 0)
-     (new-instance "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-     (check-cast v0 "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-
-     (:if-true-label)
-     (check-cast v0 "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-    )
-)");
-
-  code->build_cfg();
-  live_range::renumber_registers(code.get(), /* width_aware */ false);
-
-  auto expected_code = assembler::ircode_from_string(R"(
-    (
-     (const v0 0)
-     (new-instance "Ljava/lang/Object;")
-     (move-result-pseudo-object v1)
-     (check-cast v1 "Ljava/lang/Object;")
-     (move-result-pseudo-object v2)
-     (if-eq v2 v2 :if-true-label)
-
-     (const v3 0)
-     (new-instance "Ljava/lang/Object;")
-     (move-result-pseudo-object v4)
-     (check-cast v4 "Ljava/lang/Object;")
-     (move-result-pseudo-object v2)
-
-     (:if-true-label)
-     (check-cast v2 "Ljava/lang/Object;")
-     (move-result-pseudo-object v5)
-    )
-)");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
-  EXPECT_EQ(code->get_registers_size(), 6);
-}
-
-TEST_F(RegAllocTest, WidthAwareLiveRange) {
-  auto code = assembler::ircode_from_string(R"(
-    (
-     (const v0 0)
-     (const-wide v0 0)
-     (sput-wide v0 "LFoo;.bar:I")
-     (new-instance "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-     (check-cast v0 "Ljava/lang/Object;")
-     (move-result-pseudo-object v0)
-    )
-)");
-
-  code->build_cfg();
-  live_range::renumber_registers(code.get(), /* width_aware */ true);
-
-  auto expected_code = assembler::ircode_from_string(R"(
-    (
-     (const v0 0)
-     (const-wide v1 0)
-     (sput-wide v1 "LFoo;.bar:I")
-     (new-instance "Ljava/lang/Object;")
-     (move-result-pseudo-object v3) ; skip v2 since we have a wide value in v1
-     (check-cast v3 "Ljava/lang/Object;")
-     (move-result-pseudo-object v4)
-    )
-)");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
-  EXPECT_EQ(code->get_registers_size(), 5);
 }
 
 TEST_F(RegAllocTest, VirtualRegistersFile) {
@@ -284,11 +166,11 @@ TEST_F(RegAllocTest, BuildInterferenceGraph) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
   // +---+
   // | 1 |
   // +---+
@@ -392,14 +274,15 @@ TEST_F(RegAllocTest, Coalesce) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
   graph_coloring::Allocator allocator;
-  allocator.coalesce(&ig, code.get());
+  allocator.coalesce(&ig, cfg);
 
+  code->clear_cfg();
   auto expected_code = assembler::ircode_from_string(R"(
     (
      (const v0 0)
@@ -407,8 +290,7 @@ TEST_F(RegAllocTest, Coalesce) {
      (return v0)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
 TEST_F(RegAllocTest, MoveWideCoalesce) {
@@ -424,18 +306,18 @@ TEST_F(RegAllocTest, MoveWideCoalesce) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
 
   EXPECT_TRUE(ig.is_coalesceable(0, 1));
   EXPECT_TRUE(ig.is_adjacent(0, 1));
 
   graph_coloring::Allocator allocator;
-  allocator.coalesce(&ig, code.get());
-
+  allocator.coalesce(&ig, cfg);
+  code->clear_cfg();
   auto expected_code = assembler::ircode_from_string(R"(
     (
      (const-wide v0 0)
@@ -443,8 +325,7 @@ TEST_F(RegAllocTest, MoveWideCoalesce) {
      (return-wide v0)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
 TEST_F(RegAllocTest, NoCoalesceWide) {
@@ -464,19 +345,49 @@ TEST_F(RegAllocTest, NoCoalesceWide) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
 
   EXPECT_FALSE(ig.is_coalesceable(0, 1));
   EXPECT_TRUE(ig.is_adjacent(0, 1));
 
   graph_coloring::Allocator allocator;
-  allocator.coalesce(&ig, code.get());
-
+  allocator.coalesce(&ig, cfg);
+  code->clear_cfg();
   EXPECT_EQ(assembler::to_s_expr(code.get()), original_code_s_expr);
+}
+
+TEST_F(RegAllocTest, NoOverlapWideSrcs) {
+  auto method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:()Z"
+     (
+      (const-wide v0 0)
+      (const-wide v2 0)
+      (cmp-long v1 v0 v2)
+      (return v1)
+     )
+    )
+)");
+  method->get_code()->set_registers_size(4);
+  method->get_code()->build_cfg();
+  graph_coloring::Allocator::Config config;
+  graph_coloring::allocate(config, method);
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (const-wide v3 0)
+     (const-wide v1 0)
+     ; dest register here must not overlap the high registers of the wide input values
+     (cmp-long v0 v3 v1)
+     (return v0)
+    )
+)");
+
+  method->get_code()->clear_cfg();
+  EXPECT_CODE_EQ(expected_code.get(), method->get_code());
 }
 
 static std::vector<reg_t> stack_to_vec(std::stack<reg_t> stack) {
@@ -562,12 +473,12 @@ TEST_F(RegAllocTest, SelectRange) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
-  RangeSet range_set = init_range_set(code.get());
+  RangeSet range_set = init_range_set(cfg);
   EXPECT_EQ(range_set.size(), 1);
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
   for (size_t i = 0; i < 6; ++i) {
     auto& node = ig.get_node(i);
     EXPECT_TRUE(node.is_range() && node.is_param());
@@ -580,12 +491,11 @@ TEST_F(RegAllocTest, SelectRange) {
   std::stack<reg_t> select_stack;
   std::stack<reg_t> spilled_select_stack;
   allocator.simplify(&ig, &select_stack, &spilled_select_stack);
-  allocator.select(code.get(), ig, &select_stack, &reg_transform, &spill_plan);
+  allocator.select(cfg, ig, &select_stack, &reg_transform, &spill_plan);
   // v3 is referenced by both range and non-range instructions. We should not
   // allocate it in select() but leave it to select_ranges()
   EXPECT_EQ(reg_transform.map, (transform::RegMap{{6, 0}}));
-  allocator.select_ranges(
-      code.get(), ig, range_set, &reg_transform, &spill_plan);
+  allocator.select_ranges(cfg, ig, range_set, &reg_transform, &spill_plan);
   EXPECT_EQ(reg_transform.map,
             (transform::RegMap{
                 {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 0}}));
@@ -605,28 +515,29 @@ TEST_F(RegAllocTest, SelectAliasedRange) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
+  auto ii = InstructionIterable(code->cfg());
   auto invoke_it =
-      std::find_if(code->begin(), code->end(), [](const MethodItemEntry& mie) {
+      std::find_if(ii.begin(), ii.end(), [](const MethodItemEntry& mie) {
         return mie.type == MFLOW_OPCODE &&
                mie.insn->opcode() == OPCODE_INVOKE_STATIC;
       });
-  ASSERT_NE(invoke_it, code->end());
+  ASSERT_NE(invoke_it, ii.end());
   auto invoke = invoke_it->insn;
   RangeSet range_set;
   range_set.emplace(invoke);
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
   graph_coloring::SpillPlan spill_plan;
   graph_coloring::RegisterTransform reg_transform;
   graph_coloring::Allocator allocator;
-  allocator.select_ranges(
-      code.get(), ig, range_set, &reg_transform, &spill_plan);
+  allocator.select_ranges(cfg, ig, range_set, &reg_transform, &spill_plan);
 
   EXPECT_EQ(spill_plan.range_spills.at(invoke), std::vector<size_t>{1});
 
-  allocator.spill(ig, spill_plan, range_set, code.get());
+  allocator.spill(ig, spill_plan, range_set, cfg);
+  code->clear_cfg();
   auto expected_code = assembler::ircode_from_string(R"(
     (
      (const v0 0)
@@ -636,8 +547,7 @@ TEST_F(RegAllocTest, SelectAliasedRange) {
     )
 )");
 
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
 /*
@@ -658,21 +568,20 @@ TEST_F(RegAllocTest, AlignRanges) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
-  for (auto& mie : InstructionIterable(code.get())) {
+  for (auto& mie : InstructionIterable(code->cfg())) {
     if (mie.insn->opcode() == OPCODE_INVOKE_STATIC) {
       range_set.emplace(mie.insn);
     }
   }
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
   graph_coloring::SpillPlan spill_plan;
   graph_coloring::RegisterTransform reg_transform;
   graph_coloring::Allocator allocator;
-  allocator.select_ranges(
-      code.get(), ig, range_set, &reg_transform, &spill_plan);
+  allocator.select_ranges(cfg, ig, range_set, &reg_transform, &spill_plan);
 
   EXPECT_EQ(reg_transform.map, (transform::RegMap{{0, 0}, {1, 1}}));
   EXPECT_EQ(reg_transform.size, 2);
@@ -696,22 +605,23 @@ TEST_F(RegAllocTest, Spill) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
 
   SplitPlan split_plan;
   graph_coloring::SpillPlan spill_plan;
-  spill_plan.global_spills = std::unordered_map<reg_t, reg_t> {
-    {0, 16},
-    {1, 16},
-    {2, 256},
+  spill_plan.global_spills = std::unordered_map<reg_t, vreg_t>{
+      {0, 16},
+      {1, 16},
+      {2, 256},
   };
   graph_coloring::Allocator allocator;
-  allocator.spill(ig, spill_plan, range_set, code.get());
+  allocator.spill(ig, spill_plan, range_set, cfg);
 
+  code->clear_cfg();
   auto expected_code = assembler::ircode_from_string(R"(
     (
      (load-param-object v3)
@@ -730,8 +640,7 @@ TEST_F(RegAllocTest, Spill) {
      (return v7)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
 TEST_F(RegAllocTest, NoSpillSingleArgInvokes) {
@@ -749,21 +658,22 @@ TEST_F(RegAllocTest, NoSpillSingleArgInvokes) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
 
   SplitPlan split_plan;
   graph_coloring::SpillPlan spill_plan;
-  spill_plan.global_spills = std::unordered_map<reg_t, reg_t> {
-    {0, 16},
-    {1, 0},
+  spill_plan.global_spills = std::unordered_map<reg_t, vreg_t>{
+      {0, 16},
+      {1, 0},
   };
   graph_coloring::Allocator allocator;
-  allocator.spill(ig, spill_plan, range_set, code.get());
+  allocator.spill(ig, spill_plan, range_set, cfg);
 
+  code->clear_cfg();
   auto expected_code = assembler::ircode_from_string(R"(
     (
      (const v0 0)
@@ -773,8 +683,7 @@ TEST_F(RegAllocTest, NoSpillSingleArgInvokes) {
      (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
 TEST_F(RegAllocTest, ContainmentGraph) {
@@ -794,11 +703,11 @@ TEST_F(RegAllocTest, ContainmentGraph) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
   EXPECT_TRUE(ig.has_containment_edge(0, 1));
   EXPECT_TRUE(ig.has_containment_edge(1, 0));
   EXPECT_TRUE(ig.has_containment_edge(1, 2));
@@ -816,8 +725,9 @@ TEST_F(RegAllocTest, ContainmentGraph) {
   EXPECT_FALSE(ig.has_containment_edge(4, 1));
 
   graph_coloring::Allocator allocator;
-  allocator.coalesce(&ig, code.get());
+  allocator.coalesce(&ig, cfg);
 
+  code->clear_cfg();
   auto expected_code = assembler::ircode_from_string(R"(
     (
      (load-param v0)
@@ -827,8 +737,7 @@ TEST_F(RegAllocTest, ContainmentGraph) {
      (return v0)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
   EXPECT_TRUE(ig.has_containment_edge(1, 0));
   EXPECT_TRUE(ig.has_containment_edge(0, 1));
 }
@@ -850,23 +759,23 @@ TEST_F(RegAllocTest, FindSplit) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
 
   SplitCosts split_costs;
   SplitPlan split_plan;
   graph_coloring::SpillPlan spill_plan;
-  spill_plan.global_spills = std::unordered_map<reg_t, reg_t>{{1, 256}};
+  spill_plan.global_spills = std::unordered_map<reg_t, vreg_t>{{1, 256}};
   graph_coloring::RegisterTransform reg_transform;
   reg_transform.map = transform::RegMap{{0, 0}};
   graph_coloring::Allocator allocator;
-  calc_split_costs(fixpoint_iter, code.get(), &split_costs);
+  calc_split_costs(fixpoint_iter, cfg, &split_costs);
   allocator.find_split(
       ig, split_costs, &reg_transform, &spill_plan, &split_plan);
-  EXPECT_EQ(split_plan.split_around.at(1), std::unordered_set<reg_t>{0});
+  EXPECT_EQ(split_plan.split_around.at(1), std::unordered_set<vreg_t>{0});
 }
 
 TEST_F(RegAllocTest, Split) {
@@ -885,23 +794,24 @@ TEST_F(RegAllocTest, Split) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
 
   SplitCosts split_costs;
   SplitPlan split_plan;
   graph_coloring::SpillPlan spill_plan;
   // split 0 around 1
   split_plan.split_around =
-      std::unordered_map<reg_t, std::unordered_set<reg_t>>{
-          {1, std::unordered_set<reg_t>{0}}};
+      std::unordered_map<vreg_t, std::unordered_set<vreg_t>>{
+          {1, std::unordered_set<vreg_t>{0}}};
   graph_coloring::Allocator allocator;
-  allocator.spill(ig, spill_plan, range_set, code.get());
-  split(fixpoint_iter, split_plan, split_costs, ig, code.get());
-
+  allocator.spill(ig, spill_plan, range_set, cfg);
+  split(fixpoint_iter, split_plan, split_costs, ig, cfg);
+  cfg.recompute_registers_size();
+  code->clear_cfg();
   auto expected_code = assembler::ircode_from_string(R"(
     (
      (const v0 1)
@@ -916,8 +826,7 @@ TEST_F(RegAllocTest, Split) {
      (return v3)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
 TEST_F(RegAllocTest, ParamFirstUse) {
@@ -936,17 +845,18 @@ TEST_F(RegAllocTest, ParamFirstUse) {
   auto& cfg = code->cfg();
   cfg.calculate_exit_block();
   LivenessFixpointIterator fixpoint_iter(cfg);
-  fixpoint_iter.run(LivenessDomain(code->get_registers_size()));
+  fixpoint_iter.run(LivenessDomain());
 
   RangeSet range_set;
   interference::Graph ig = interference::build_graph(
-      fixpoint_iter, code.get(), code->get_registers_size(), range_set);
+      fixpoint_iter, cfg, code->get_registers_size(), range_set);
 
   graph_coloring::SpillPlan spill_plan;
   spill_plan.param_spills = std::unordered_set<reg_t>{0, 1};
   graph_coloring::Allocator allocator;
-  allocator.split_params(ig, spill_plan.param_spills, code.get());
-
+  allocator.split_params(ig, spill_plan.param_spills, cfg);
+  cfg.recompute_registers_size();
+  code->clear_cfg();
   auto expected_code = assembler::ircode_from_string(R"(
     (
      (load-param v4)
@@ -965,6 +875,41 @@ TEST_F(RegAllocTest, ParamFirstUse) {
      (return v3)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(RegAllocTest, NoOverwriteThis) {
+  auto method = assembler::method_from_string(R"(
+    (method (public) "LFoo;.bar:(I)LFoo;"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (if-eqz v1 :true-label)
+      (sget-object "LFoo;.foo:LFoo;")
+      (move-result-object v0)
+      (:true-label)
+      (return-object v0)
+     )
+    )
+)");
+  method->get_code()->set_registers_size(2);
+  method->get_code()->build_cfg();
+  graph_coloring::Allocator::Config config;
+  config.no_overwrite_this = true;
+  graph_coloring::allocate(config, method);
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (load-param-object v1)
+     (load-param v2)
+     (move-object v0 v1)
+     (if-eqz v2 :true-label)
+     (sget-object "LFoo;.foo:LFoo;")
+     (move-result-object v0)
+     (:true-label)
+     (return-object v0)
+    )
+)");
+  method->get_code()->clear_cfg();
+  EXPECT_CODE_EQ(expected_code.get(), method->get_code());
 }

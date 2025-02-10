@@ -1,20 +1,19 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
-#include <memory>
 #include <gtest/gtest.h>
+#include <memory>
 
-#include "DexClass.h"
 #include "Creators.h"
+#include "DexClass.h"
 #include "DexUtil.h"
-#include "VirtualScope.h"
+#include "RedexContext.h"
 #include "ScopeHelper.h"
+#include "VirtualScope.h"
 
 //
 // Scopes
@@ -27,7 +26,7 @@
  */
 std::vector<DexClass*> create_scope_1() {
   std::vector<DexClass*> scope = create_empty_scope();
-  auto obj_t = get_object_type();
+  auto obj_t = type::java_lang_Object();
 
   // class A
   auto a_t = DexType::make_type("LA;");
@@ -39,10 +38,9 @@ std::vector<DexClass*> create_scope_1() {
   scope.push_back(b_cls);
 
   // make sigs
-  auto void_t = get_void_type();
-  auto bool_t = get_boolean_type();
-  auto void_void = DexProto::make_proto(
-      void_t, DexTypeList::make_type_list({}));
+  auto void_t = type::_void();
+  auto void_void =
+      DexProto::make_proto(void_t, DexTypeList::make_type_list({}));
 
   // A.f()
   create_empty_method(a_cls, "f", void_void);
@@ -62,7 +60,6 @@ std::vector<DexClass*> create_scope_1() {
  */
 std::vector<DexClass*> create_scope_2() {
   std::vector<DexClass*> scope = create_scope_1();
-  auto a_t = DexType::get_type("LA;");
   auto b_t = DexType::get_type("LB;");
 
   // class C
@@ -79,9 +76,9 @@ std::vector<DexClass*> create_scope_2() {
   scope.push_back(e_cls);
 
   // make sigs
-  auto void_t = get_void_type();
-  auto void_void = DexProto::make_proto(
-      void_t, DexTypeList::make_type_list({}));
+  auto void_t = type::_void();
+  auto void_void =
+      DexProto::make_proto(void_t, DexTypeList::make_type_list({}));
 
   // B.f()
   auto b_cls = type_class(b_t);
@@ -90,7 +87,6 @@ std::vector<DexClass*> create_scope_2() {
   create_empty_method(d_cls, "f", void_void);
   // E.g()
   create_empty_method(e_cls, "g", void_void);
-
 
   return scope;
 }
@@ -114,16 +110,14 @@ std::vector<DexClass*> create_scope_3() {
   scope.push_back(f_cls);
 
   // make sigs
-  auto void_t = get_void_type();
-  auto int_t = get_int_type();
-  auto bool_t = get_boolean_type();
-  auto obj_t = get_object_type();
-  auto void_void = DexProto::make_proto(
-      void_t, DexTypeList::make_type_list({}));
-  auto void_int = DexProto::make_proto(
-      void_t, DexTypeList::make_type_list({int_t}));
-  auto bool_object = DexProto::make_proto(
-      bool_t, DexTypeList::make_type_list({obj_t}));
+  auto void_t = type::_void();
+  auto int_t = type::_int();
+  auto bool_t = type::_boolean();
+  auto obj_t = type::java_lang_Object();
+  auto void_int =
+      DexProto::make_proto(void_t, DexTypeList::make_type_list({int_t}));
+  auto bool_object =
+      DexProto::make_proto(bool_t, DexTypeList::make_type_list({obj_t}));
 
   // C.g(int)
   auto c_t = DexType::get_type("LC;");
@@ -160,14 +154,14 @@ std::vector<DexClass*> create_scope_4() {
 
   // interface Intf1
   auto intf1_t = DexType::make_type("LIntf1;");
-  auto intf1_cls = create_internal_class(
-      intf1_t, get_object_type(), {}, ACC_INTERFACE | ACC_PUBLIC);
+  auto intf1_cls = create_internal_class(intf1_t, type::java_lang_Object(), {},
+                                         ACC_INTERFACE | ACC_PUBLIC);
   scope.push_back(intf1_cls);
 
   // make signatures
-  auto void_t = get_void_type();
-  auto void_void = DexProto::make_proto(
-      void_t, DexTypeList::make_type_list({}));
+  auto void_t = type::_void();
+  auto void_void =
+      DexProto::make_proto(void_t, DexTypeList::make_type_list({}));
   create_abstract_method(intf1_cls, "f", void_void);
 
   // add interface to B
@@ -199,13 +193,13 @@ std::vector<DexClass*> create_scope_5() {
   std::vector<DexClass*> scope = create_scope_4();
   // interface Intf2
   auto intf2_t = DexType::make_type("LIntf2;");
-  auto intf2_cls = create_internal_class(
-      intf2_t, get_object_type(), {}, ACC_INTERFACE | ACC_PUBLIC);
+  auto intf2_cls = create_internal_class(intf2_t, type::java_lang_Object(), {},
+                                         ACC_INTERFACE | ACC_PUBLIC);
   scope.push_back(intf2_cls);
   // class C extends B implements Intf2
   auto c_t = DexType::get_type("LC;");
   auto c_cls = type_class(c_t);
-  std::deque<DexType*> c_intfs;
+  DexTypeList::ContainerType c_intfs;
   c_intfs.emplace_back(intf2_t);
   c_cls->set_interfaces(DexTypeList::make_type_list(std::move(c_intfs)));
   // class G extends F { void g(int) {} }
@@ -235,13 +229,10 @@ std::vector<DexClass*> create_scope_5() {
   scope.push_back(l_cls);
 
   // make sigs
-  auto void_t = get_void_type();
-  auto int_t = get_int_type();
-  auto obj_t = get_object_type();
-  auto void_void = DexProto::make_proto(
-      void_t, DexTypeList::make_type_list({}));
-  auto void_int = DexProto::make_proto(
-      void_t, DexTypeList::make_type_list({int_t}));
+  auto void_t = type::_void();
+  auto int_t = type::_int();
+  auto void_int =
+      DexProto::make_proto(void_t, DexTypeList::make_type_list({int_t}));
   // Intf2.g(int)
   create_abstract_method(intf2_cls, "g", void_int);
   // G.g(int)
@@ -281,12 +272,14 @@ std::vector<DexClass*> create_scope_6() {
   // class C extends B implements Intf2
   auto d_t = DexType::get_type("LD;");
   auto d_cls = type_class(d_t);
-  std::deque<DexType*> d_intfs;
+  DexTypeList::ContainerType d_intfs;
   d_intfs.emplace_back(intf2_t);
   d_cls->set_interfaces(DexTypeList::make_type_list(std::move(d_intfs)));
 
   return scope;
 }
+
+/* clang-format off */
 
 /**
  * interface Intf1 { void f(); }
@@ -305,15 +298,18 @@ std::vector<DexClass*> create_scope_6() {
  *     class D extends C implements Intf2 { void f() {} void g(int) {} }
  *     class E extends C { void g() {} void g(int) {}}
  */
+
+/* clang-format on */
+
 std::vector<DexClass*> create_scope_7() {
   std::vector<DexClass*> scope = create_scope_6();
   // F.g(int)
   auto b_t = DexType::get_type("LF;");
   auto b_cls = type_class(b_t);
-  auto void_t = get_void_type();
-  auto int_t = get_int_type();
-  auto void_int = DexProto::make_proto(
-      void_t, DexTypeList::make_type_list({int_t}));
+  auto void_t = type::_void();
+  auto int_t = type::_int();
+  auto void_int =
+      DexProto::make_proto(void_t, DexTypeList::make_type_list({int_t}));
   create_empty_method(b_cls, "g", void_int);
 
   return scope;
@@ -372,19 +368,19 @@ std::vector<DexClass*> create_scope_9() {
   // interface Intf3
   auto intf2_t = DexType::make_type("LIntf2;");
   auto intf3_t = DexType::make_type("LIntf3;");
-  auto intf3_cls = create_internal_class(
-      intf3_t, get_object_type(), {}, ACC_INTERFACE | ACC_PUBLIC);
+  auto intf3_cls = create_internal_class(intf3_t, type::java_lang_Object(), {},
+                                         ACC_INTERFACE | ACC_PUBLIC);
   scope.push_back(intf3_cls);
   // class D extends C implements Intf2, Intf3
   auto d_t = DexType::get_type("LD;");
   auto d_cls = type_class(d_t);
-  std::deque<DexType*> d_intfs;
+  DexTypeList::ContainerType d_intfs;
   d_intfs.emplace_back(intf2_t);
   d_intfs.emplace_back(intf3_t);
   d_cls->set_interfaces(DexTypeList::make_type_list(std::move(d_intfs)));
   // Intf3.f()
-  auto void_void = DexProto::make_proto(
-      get_void_type(), DexTypeList::make_type_list({}));
+  auto void_void =
+      DexProto::make_proto(type::_void(), DexTypeList::make_type_list({}));
   create_abstract_method(intf3_cls, "f", void_void);
   return scope;
 }
@@ -417,20 +413,21 @@ std::vector<DexClass*> create_scope_10() {
 
   // interface Intf4
   auto intf4_t = DexType::make_type("LIntf4;");
-  auto intf4_cls = create_internal_class(
-      intf4_t, get_object_type(), {}, ACC_INTERFACE | ACC_PUBLIC);
+  auto intf4_cls = create_internal_class(intf4_t, type::java_lang_Object(), {},
+                                         ACC_INTERFACE | ACC_PUBLIC);
   scope.push_back(intf4_cls);
 
   // Intf4.f();
-  create_empty_method(intf4_cls, "f",
-      DexProto::make_proto(get_void_type(), DexTypeList::make_type_list({})));
+  create_empty_method(
+      intf4_cls, "f",
+      DexProto::make_proto(type::_void(), DexTypeList::make_type_list({})));
 
   // interface Intf1 implements Intf2 { void f(); }
   type_class(intf1_t)->set_interfaces(
-      DexTypeList::make_type_list(std::move(std::deque<DexType*>{intf2_t})));
+      DexTypeList::make_type_list(DexTypeList::ContainerType{intf2_t}));
   // interface Intf3 implements Intf4 { void f()); }
   type_class(intf3_t)->set_interfaces(
-      DexTypeList::make_type_list(std::move(std::deque<DexType*>{intf4_t})));
+      DexTypeList::make_type_list(DexTypeList::ContainerType{intf4_t}));
 
   return scope;
 }
@@ -463,22 +460,23 @@ std::vector<DexClass*> create_scope_11() {
   auto esc_intf_t = DexType::make_type("LEscIntf;");
   // class M
   auto m_t = DexType::make_type("LM;");
-  auto m_cls = create_internal_class(
-      m_t, get_object_type(), {}, ACC_PUBLIC);
+  auto m_cls =
+      create_internal_class(m_t, type::java_lang_Object(), {}, ACC_PUBLIC);
   scope.push_back(m_cls);
   auto n_t = DexType::make_type("LN;");
-  auto n_cls = create_internal_class(
-      n_t, m_t, {esc_intf_t}, ACC_PUBLIC);
+  auto n_cls = create_internal_class(n_t, m_t, {esc_intf_t}, ACC_PUBLIC);
   scope.push_back(n_cls);
 
   // M.f(int);
-  create_empty_method(m_cls, "f",
-      DexProto::make_proto(get_void_type(),
-          DexTypeList::make_type_list({get_int_type()})));
+  create_empty_method(
+      m_cls, "f",
+      DexProto::make_proto(type::_void(),
+                           DexTypeList::make_type_list({type::_int()})));
   // N.g(int);
-  create_empty_method(n_cls, "h",
-      DexProto::make_proto(get_void_type(),
-          DexTypeList::make_type_list({get_int_type()})));
+  create_empty_method(
+      n_cls, "h",
+      DexProto::make_proto(type::_void(),
+                           DexTypeList::make_type_list({type::_int()})));
 
   return scope;
 }

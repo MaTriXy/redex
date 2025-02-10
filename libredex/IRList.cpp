@@ -1,19 +1,84 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "IRList.h"
 
-#include <vector>
 #include <iterator>
+#include <sstream>
+#include <vector>
 
+#include "DexClass.h"
+#include "DexDebugInstruction.h"
+#include "DexInstruction.h"
+#include "DexPosition.h"
 #include "DexUtil.h"
 #include "IRInstruction.h"
+#include "Show.h"
+
+bool TryEntry::operator==(const TryEntry& other) const {
+  return type == other.type && *catch_start == *other.catch_start;
+}
+
+bool CatchEntry::operator==(const CatchEntry& other) const {
+  if (catch_type != other.catch_type) return false;
+  if (next == other.next) return true;
+  if (next == nullptr || other.next == nullptr) return false;
+  return *next == *other.next;
+}
+
+bool BranchTarget::operator==(const BranchTarget& other) const {
+  if (type != other.type) return false;
+  if (src == other.src) return true;
+  if (src == nullptr || other.src == nullptr) return false;
+  return *src == *other.src;
+}
+
+std::ostream& operator<<(std::ostream& os, const MethodItemType& type) {
+  switch (type) {
+  case MFLOW_TRY:
+    os << "try";
+    return os;
+  case MFLOW_CATCH:
+    os << "catch";
+    return os;
+  case MFLOW_OPCODE:
+    os << "opcode";
+    return os;
+  case MFLOW_DEX_OPCODE:
+    os << "dex-opcode";
+    return os;
+  case MFLOW_TARGET:
+    os << "target";
+    return os;
+  case MFLOW_DEBUG:
+    os << "debug";
+    return os;
+  case MFLOW_POSITION:
+    os << "position";
+    return os;
+  case MFLOW_SOURCE_BLOCK:
+    os << "source-block";
+    return os;
+  case MFLOW_FALLTHROUGH:
+    os << "fallthrough";
+    return os;
+  }
+  os << "unknown type " << (uint32_t)type;
+  return os;
+}
+
+MethodItemEntry::MethodItemEntry(std::unique_ptr<DexDebugInstruction> dbgop)
+    : type(MFLOW_DEBUG), dbgop(std::move(dbgop)) {}
+
+MethodItemEntry::MethodItemEntry(std::unique_ptr<DexPosition> pos)
+    : type(MFLOW_POSITION), pos(std::move(pos)) {}
+
+MethodItemEntry::MethodItemEntry(std::unique_ptr<SourceBlock> src_block)
+    : type(MFLOW_SOURCE_BLOCK), src_block(std::move(src_block)) {}
 
 MethodItemEntry::MethodItemEntry(const MethodItemEntry& that)
     : type(that.type) {
@@ -39,6 +104,10 @@ MethodItemEntry::MethodItemEntry(const MethodItemEntry& that)
   case MFLOW_POSITION:
     new (&pos) std::unique_ptr<DexPosition>(new DexPosition(*that.pos));
     break;
+  case MFLOW_SOURCE_BLOCK:
+    new (&src_block)
+        std::unique_ptr<SourceBlock>(new SourceBlock(*that.src_block));
+    break;
   case MFLOW_FALLTHROUGH:
     break;
   }
@@ -46,30 +115,43 @@ MethodItemEntry::MethodItemEntry(const MethodItemEntry& that)
 
 MethodItemEntry::~MethodItemEntry() {
   switch (type) {
-    case MFLOW_TRY:
-      delete tentry;
-      break;
-    case MFLOW_CATCH:
-      delete centry;
-      break;
-    case MFLOW_TARGET:
-      delete target;
-      break;
-    case MFLOW_DEBUG:
-      dbgop.~unique_ptr<DexDebugInstruction>();
-      break;
-    case MFLOW_POSITION:
-      pos.~unique_ptr<DexPosition>();
-      break;
-    case MFLOW_OPCODE:
-    case MFLOW_DEX_OPCODE:
-    case MFLOW_FALLTHROUGH:
-      /* nothing to delete */
-      break;
+  case MFLOW_TRY:
+    delete tentry;
+    break;
+  case MFLOW_CATCH:
+    delete centry;
+    break;
+  case MFLOW_TARGET:
+    delete target;
+    break;
+  case MFLOW_DEBUG:
+    dbgop.~unique_ptr<DexDebugInstruction>();
+    break;
+  case MFLOW_POSITION:
+    pos.~unique_ptr<DexPosition>();
+    break;
+  case MFLOW_SOURCE_BLOCK:
+    src_block.~unique_ptr<SourceBlock>();
+    break;
+  case MFLOW_DEX_OPCODE:
+    delete dex_insn;
+    break;
+  case MFLOW_OPCODE:
+  case MFLOW_FALLTHROUGH:
+    /* nothing to delete */
+    break;
   }
 }
 
-void MethodItemEntry::gather_strings(std::vector<DexString*>& lstring) const {
+void MethodItemEntry::replace_ir_with_dex(DexInstruction* dex_insn) {
+  always_assert(type == MFLOW_OPCODE);
+  delete this->insn;
+  this->type = MFLOW_DEX_OPCODE;
+  this->dex_insn = dex_insn;
+}
+
+void MethodItemEntry::gather_strings(
+    std::vector<const DexString*>& lstring) const {
   switch (type) {
   case MFLOW_TRY:
     break;
@@ -90,16 +172,24 @@ void MethodItemEntry::gather_strings(std::vector<DexString*>& lstring) const {
     // although DexPosition contains strings, these strings don't find their
     // way into the APK
     break;
+  case MFLOW_SOURCE_BLOCK:
   case MFLOW_FALLTHROUGH:
     break;
   }
 }
 
-void MethodItemEntry::gather_methods(std::vector<DexMethodRef*>& lmethod) const {
+void MethodItemEntry::gather_methods(
+    std::vector<DexMethodRef*>& lmethod) const {
   switch (type) {
   case MFLOW_TRY:
-    break;
   case MFLOW_CATCH:
+  case MFLOW_POSITION:
+  case MFLOW_FALLTHROUGH:
+  case MFLOW_TARGET:
+  // SourceBlock does not keep the method reachable.
+  case MFLOW_SOURCE_BLOCK:
+  // DexDebugInstruction does not have method reference.
+  case MFLOW_DEBUG:
     break;
   case MFLOW_OPCODE:
     insn->gather_methods(lmethod);
@@ -107,12 +197,52 @@ void MethodItemEntry::gather_methods(std::vector<DexMethodRef*>& lmethod) const 
   case MFLOW_DEX_OPCODE:
     dex_insn->gather_methods(lmethod);
     break;
+  }
+}
+
+void MethodItemEntry::gather_callsites(
+    std::vector<DexCallSite*>& lcallsite) const {
+  switch (type) {
+  case MFLOW_TRY:
+  case MFLOW_CATCH:
+  case MFLOW_POSITION:
+  case MFLOW_FALLTHROUGH:
+  case MFLOW_TARGET:
+  case MFLOW_SOURCE_BLOCK:
+    break;
+  case MFLOW_OPCODE:
+    insn->gather_callsites(lcallsite);
+    break;
+  case MFLOW_DEX_OPCODE:
+    dex_insn->gather_callsites(lcallsite);
+    break;
+  case MFLOW_DEBUG:
+    dbgop->gather_callsites(lcallsite);
+    break;
+  }
+}
+
+void MethodItemEntry::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  switch (type) {
+  case MFLOW_TRY:
+    break;
+  case MFLOW_CATCH:
+    break;
+  case MFLOW_OPCODE:
+    insn->gather_methodhandles(lmethodhandle);
+    break;
+  case MFLOW_DEX_OPCODE:
+    dex_insn->gather_methodhandles(lmethodhandle);
+    break;
   case MFLOW_TARGET:
     break;
   case MFLOW_DEBUG:
-    dbgop->gather_methods(lmethod);
+    dbgop->gather_methodhandles(lmethodhandle);
     break;
   case MFLOW_POSITION:
+    break;
+  case MFLOW_SOURCE_BLOCK:
     break;
   case MFLOW_FALLTHROUGH:
     break;
@@ -137,6 +267,8 @@ void MethodItemEntry::gather_fields(std::vector<DexFieldRef*>& lfield) const {
     dbgop->gather_fields(lfield);
     break;
   case MFLOW_POSITION:
+    break;
+  case MFLOW_SOURCE_BLOCK:
     break;
   case MFLOW_FALLTHROUGH:
     break;
@@ -165,8 +297,16 @@ void MethodItemEntry::gather_types(std::vector<DexType*>& ltype) const {
     break;
   case MFLOW_POSITION:
     break;
+  case MFLOW_SOURCE_BLOCK:
+    break;
   case MFLOW_FALLTHROUGH:
     break;
+  }
+}
+
+void MethodItemEntry::gather_init_classes(std::vector<DexType*>& ltype) const {
+  if (type == MFLOW_OPCODE) {
+    insn->gather_init_classes(ltype);
   }
 }
 
@@ -175,15 +315,149 @@ opcode::Branchingness MethodItemEntry::branchingness() const {
   case MFLOW_OPCODE:
     return opcode::branchingness(insn->opcode());
   case MFLOW_DEX_OPCODE:
-    always_assert_log(false, "Not expecting dex instructions here");
-    not_reached();
+    not_reached_log("Not expecting dex instructions here");
   default:
     return opcode::BRANCH_NONE;
   }
 }
 
+MethodItemEntryCloner::MethodItemEntryCloner() {
+  m_entry_map[nullptr] = nullptr;
+  m_pos_map[nullptr] = nullptr;
+}
+
+MethodItemEntry* MethodItemEntryCloner::clone(const MethodItemEntry* mie) {
+
+  const auto& pair = m_entry_map.emplace(mie, nullptr);
+  auto& it = pair.first;
+  bool was_already_there = !pair.second;
+  if (was_already_there) {
+    return it->second;
+  }
+  auto cloned_mie = new MethodItemEntry(*mie);
+  it->second = cloned_mie;
+
+  switch (cloned_mie->type) {
+  case MFLOW_TRY:
+    cloned_mie->tentry = new TryEntry(*cloned_mie->tentry);
+    cloned_mie->tentry->catch_start = clone(cloned_mie->tentry->catch_start);
+    return cloned_mie;
+  case MFLOW_CATCH:
+    cloned_mie->centry = new CatchEntry(*cloned_mie->centry);
+    cloned_mie->centry->next = clone(cloned_mie->centry->next);
+    return cloned_mie;
+  case MFLOW_OPCODE: {
+    auto* insn = cloned_mie->insn;
+    if (insn->has_data()) {
+      cloned_mie->insn = new IRInstruction(insn->opcode());
+      always_assert(!insn->has_dest());
+      always_assert(insn->srcs_size() <= 1);
+      if (insn->srcs_size() == 1) {
+        cloned_mie->insn->set_src(0, insn->src(0));
+      }
+      cloned_mie->insn->set_data(insn->get_data()->clone_as_unique_ptr());
+    } else {
+      cloned_mie->insn = new IRInstruction(*insn);
+    }
+    return cloned_mie;
+  }
+  case MFLOW_TARGET:
+    cloned_mie->target = new BranchTarget(*cloned_mie->target);
+    cloned_mie->target->src = clone(cloned_mie->target->src);
+    return cloned_mie;
+  case MFLOW_DEBUG:
+    return cloned_mie;
+  case MFLOW_POSITION:
+    m_pos_map[mie->pos.get()] = cloned_mie->pos.get();
+    m_positions_to_fix.push_back(cloned_mie->pos.get());
+    return cloned_mie;
+  case MFLOW_FALLTHROUGH:
+    return cloned_mie;
+  case MFLOW_SOURCE_BLOCK:
+    return cloned_mie;
+  case MFLOW_DEX_OPCODE:
+    not_reached_log("DexInstructions not expected here");
+  }
+}
+
+void MethodItemEntryCloner::fix_parent_positions(
+    const DexPosition* ignore_pos) {
+  // When the DexPosition was copied, the parent pointer was shallowly copied
+  for (DexPosition* pos : m_positions_to_fix) {
+    if (pos->parent != ignore_pos) {
+      pos->parent = m_pos_map.at(pos->parent);
+    }
+  }
+}
+
+bool MethodItemEntry::operator==(const MethodItemEntry& that) const {
+  if (type != that.type) {
+    return false;
+  }
+
+  switch (type) {
+  case MFLOW_TRY:
+    return *tentry == *that.tentry;
+  case MFLOW_CATCH:
+    return *centry == *that.centry;
+  case MFLOW_OPCODE:
+    return *insn == *that.insn;
+  case MFLOW_DEX_OPCODE:
+    return *dex_insn == *that.dex_insn;
+  case MFLOW_TARGET:
+    return *target == *that.target;
+  case MFLOW_DEBUG:
+    return *dbgop == *that.dbgop;
+  case MFLOW_POSITION:
+    return *pos == *that.pos;
+  case MFLOW_SOURCE_BLOCK:
+    return *src_block == *that.src_block;
+  case MFLOW_FALLTHROUGH:
+    return true;
+  };
+
+  not_reached();
+}
+
+// TODO: T62185151 - better way of applying this on CFGs
+void IRList::cleanup_debug(std::unordered_set<reg_t>& valid_regs) {
+  auto it = m_list.begin();
+  while (it != m_list.end()) {
+    auto next = std::next(it);
+    if (it->type == MFLOW_DEBUG) {
+      switch (it->dbgop->opcode()) {
+      case DBG_SET_PROLOGUE_END:
+        this->erase_and_dispose(it);
+        break;
+      case DBG_START_LOCAL:
+      case DBG_START_LOCAL_EXTENDED: {
+        auto reg = it->dbgop->uvalue();
+        valid_regs.insert(reg);
+        break;
+      }
+      case DBG_END_LOCAL:
+      case DBG_RESTART_LOCAL: {
+        auto reg = it->dbgop->uvalue();
+        if (valid_regs.find(reg) == valid_regs.end()) {
+          this->erase_and_dispose(it);
+        }
+        break;
+      }
+      default:
+        break;
+      }
+    }
+    it = next;
+  }
+}
+
+void IRList::cleanup_debug() {
+  std::unordered_set<reg_t> valid_regs;
+  cleanup_debug(valid_regs);
+}
+
 void IRList::replace_opcode(IRInstruction* to_delete,
-                            std::vector<IRInstruction*> replacements) {
+                            const std::vector<IRInstruction*>& replacements) {
   auto it = m_list.begin();
   for (; it != m_list.end(); it++) {
     if (it->type == MFLOW_OPCODE && it->insn == to_delete) {
@@ -193,6 +467,12 @@ void IRList::replace_opcode(IRInstruction* to_delete,
   always_assert_log(it != m_list.end(),
                     "No match found while replacing '%s'",
                     SHOW(to_delete));
+  replace_opcode(it, replacements);
+}
+
+void IRList::replace_opcode(const IRList::iterator& it,
+                            const std::vector<IRInstruction*>& replacements) {
+  always_assert(it->type == MFLOW_OPCODE);
   for (auto insn : replacements) {
     insert_before(it, insn);
   }
@@ -200,7 +480,7 @@ void IRList::replace_opcode(IRInstruction* to_delete,
 }
 
 void IRList::replace_opcode(IRInstruction* from, IRInstruction* to) {
-  always_assert_log(!is_branch(to->opcode()),
+  always_assert_log(!opcode::is_branch(to->opcode()),
                     "You may want replace_branch instead");
   replace_opcode(from, std::vector<IRInstruction*>{to});
 }
@@ -211,7 +491,7 @@ void IRList::replace_opcode_with_infinite_loop(IRInstruction* from) {
   for (; miter != m_list.end(); miter++) {
     MethodItemEntry* mentry = &*miter;
     if (mentry->type == MFLOW_OPCODE && mentry->insn == from) {
-      if (is_branch(from->opcode())) {
+      if (opcode::is_branch(from->opcode())) {
         remove_branch_targets(from);
       }
       mentry->insn = to;
@@ -219,18 +499,17 @@ void IRList::replace_opcode_with_infinite_loop(IRInstruction* from) {
       break;
     }
   }
-  always_assert_log(
-      miter != m_list.end(),
-      "No match found while replacing '%s' with '%s'",
-      SHOW(from),
-      SHOW(to));
+  always_assert_log(miter != m_list.end(),
+                    "No match found while replacing '%s' with '%s'",
+                    SHOW(from),
+                    SHOW(to));
   auto target = new BranchTarget(&*miter);
   m_list.insert(miter, *(new MethodItemEntry(target)));
 }
 
 void IRList::replace_branch(IRInstruction* from, IRInstruction* to) {
-  always_assert(is_branch(from->opcode()));
-  always_assert(is_branch(to->opcode()));
+  always_assert(opcode::is_branch(from->opcode()));
+  always_assert(opcode::is_branch(to->opcode()));
   for (auto& mentry : m_list) {
     if (mentry.type == MFLOW_OPCODE && mentry.insn == from) {
       mentry.insn = to;
@@ -238,11 +517,8 @@ void IRList::replace_branch(IRInstruction* from, IRInstruction* to) {
       return;
     }
   }
-  always_assert_log(
-      false,
-      "No match found while replacing '%s' with '%s'",
-      SHOW(from),
-      SHOW(to));
+  not_reached_log("No match found while replacing '%s' with '%s'", SHOW(from),
+                  SHOW(to));
 }
 
 void IRList::insert_after(IRInstruction* position,
@@ -270,16 +546,16 @@ void IRList::insert_after(IRInstruction* position,
       return;
     }
   }
-  always_assert_log(false, "No match found");
+  not_reached_log("No match found");
 }
 
-IRList::iterator IRList::insert_before(
-    const IRList::iterator& position, MethodItemEntry& mie) {
+IRList::iterator IRList::insert_before(const IRList::iterator& position,
+                                       MethodItemEntry& mie) {
   return m_list.insert(position, mie);
 }
 
-IRList::iterator IRList::insert_after(
-    const IRList::iterator& position, MethodItemEntry& mie) {
+IRList::iterator IRList::insert_after(const IRList::iterator& position,
+                                      MethodItemEntry& mie) {
   always_assert(position != m_list.end());
   return m_list.insert(std::next(position), mie);
 }
@@ -287,19 +563,19 @@ IRList::iterator IRList::insert_after(
 void IRList::remove_opcode(const IRList::iterator& it) {
   always_assert(it->type == MFLOW_OPCODE);
   auto insn = it->insn;
-  always_assert(!opcode::is_move_result_pseudo(insn->opcode()));
+  always_assert(!opcode::is_a_move_result_pseudo(insn->opcode()));
   if (insn->has_move_result_pseudo()) {
     auto move_it = std::next(it);
     always_assert_log(
         move_it->type == MFLOW_OPCODE &&
-            opcode::is_move_result_pseudo(move_it->insn->opcode()),
+            opcode::is_a_move_result_pseudo(move_it->insn->opcode()),
         "No move-result-pseudo found for %s",
         SHOW(insn));
     delete move_it->insn;
     move_it->type = MFLOW_FALLTHROUGH;
     move_it->insn = nullptr;
   }
-  if (is_branch(insn->opcode())) {
+  if (opcode::is_branch(insn->opcode())) {
     remove_branch_targets(insn);
   }
   it->type = MFLOW_FALLTHROUGH;
@@ -315,87 +591,11 @@ void IRList::remove_opcode(IRInstruction* insn) {
       return;
     }
   }
-  always_assert_log(false,
-                    "No match found while removing '%s' from method",
-                    SHOW(insn));
-}
-
-/*
- * Param `insn` should be part of a switch...case statement. Find the case
- * block it is contained within and remove it. Then decrement the case_key of
- * all the other case blocks that are larger than the case_key of the removed
- * block so that the case numbers don't have any gaps and the switch can
- * still be encoded as a packed-switch opcode.
- *
- * We do the removal by removing the MFLOW_TARGET corresponding to that
- * case label. Its contents are dead code which will be removed by LocalDCE
- * later. (We could do it here too, but LocalDCE already knows how to find
- * block boundaries.)
- */
-void IRList::remove_switch_case(IRInstruction* insn) {
-
-  TRACE(MTRANS, 3, "Removing switch case from: %s\n", SHOW(this));
-  // Check if we are inside switch method.
-  const MethodItemEntry* switch_mei {nullptr};
-  for (const auto& mei : InstructionIterable(m_list)) {
-    auto op = mei.insn->opcode();
-    if (opcode::is_load_param(op)) {
-      continue;
-    }
-    assert_log(is_switch(op), " Method is not a switch");
-    switch_mei = &mei;
-    break;
-  }
-  always_assert(switch_mei != nullptr);
-
-  int target_count = 0;
-  for (auto& mei : m_list) {
-    if (mei.type == MFLOW_TARGET && mei.target->type == BRANCH_MULTI) {
-      target_count++;
-    }
-  }
-  assert_log(target_count != 0, " There should be atleast one target");
-  if (target_count == 1) {
-    auto excpt_str = DexString::make_string("Redex switch Exception");
-    std::vector<IRInstruction*> excpt_block;
-    create_runtime_exception_block(excpt_str, excpt_block);
-    insert_after(insn, excpt_block);
-    remove_opcode(insn);
-    return;
-  }
-
-  // Find the starting MULTI Target point to delete.
-  MethodItemEntry* target_mei = nullptr;
-  for (auto miter = m_list.begin(); miter != m_list.end(); miter++) {
-    MethodItemEntry* mentry = &*miter;
-    if (mentry->type == MFLOW_TARGET) {
-      target_mei = mentry;
-    }
-    // Check if insn belongs to the current block.
-    if (mentry->type == MFLOW_OPCODE && mentry->insn == insn) {
-      break;
-    }
-  }
-  always_assert_log(target_mei != nullptr,
-                    "Could not find target for %s in %s",
-                    SHOW(insn),
-                    SHOW(this));
-
-  for (const auto& mie : m_list) {
-    if (mie.type == MFLOW_TARGET) {
-      BranchTarget* bt = mie.target;
-      if (bt->src == switch_mei && bt->case_key > target_mei->target->case_key) {
-        bt->case_key -= 1;
-      }
-    }
-  }
-
-  target_mei->type = MFLOW_FALLTHROUGH;
-  delete target_mei->target;
+  not_reached_log("No match found while removing '%s' from method", SHOW(insn));
 }
 
 size_t IRList::sum_opcode_sizes() const {
-  size_t size {0};
+  uint32_t size{0};
   for (const auto& mie : m_list) {
     if (mie.type == MFLOW_OPCODE) {
       size += mie.insn->size();
@@ -404,10 +604,26 @@ size_t IRList::sum_opcode_sizes() const {
   return size;
 }
 
-size_t IRList::count_opcodes() const {
-  size_t count {0};
+uint32_t IRList::estimate_code_units() const {
+  uint32_t code_units{0};
   for (const auto& mie : m_list) {
-    if (mie.type == MFLOW_OPCODE && !opcode::is_internal(mie.insn->opcode())) {
+    if (mie.type == MFLOW_OPCODE) {
+      code_units += mie.insn->size();
+      if (opcode::is_fill_array_data(mie.insn->opcode())) {
+        // fill-array-data-payload
+        auto* data = mie.insn->get_data();
+        code_units += 4 + data->size();
+      }
+    }
+  }
+  return code_units;
+}
+
+size_t IRList::count_opcodes() const {
+  size_t count{0};
+  for (const auto& mie : m_list) {
+    if (mie.type == MFLOW_OPCODE &&
+        !opcode::is_an_internal(mie.insn->opcode())) {
       ++count;
     }
   }
@@ -430,8 +646,8 @@ void IRList::sanity_check() const {
  * This method fixes the goto branches when the instruction is removed or
  * replaced by another instruction.
  */
-void IRList::remove_branch_targets(IRInstruction *branch_inst) {
-  always_assert_log(is_branch(branch_inst->opcode()),
+void IRList::remove_branch_targets(IRInstruction* branch_inst) {
+  always_assert_log(opcode::is_branch(branch_inst->opcode()),
                     "Instruction is not a branch instruction.");
   for (auto miter = m_list.begin(); miter != m_list.end(); miter++) {
     MethodItemEntry* mentry = &*miter;
@@ -446,24 +662,41 @@ void IRList::remove_branch_targets(IRInstruction *branch_inst) {
   }
 }
 
-IRList::difference_type IRList::index_of(const MethodItemEntry& mie) const {
-  return std::distance(iterator_to(mie), begin());
-}
-
-bool IRList::structural_equals(const IRList& other) const {
+bool IRList::structural_equals(
+    const IRList& other, const InstructionEquality& instruction_equals) const {
   auto it1 = m_list.begin();
   auto it2 = other.begin();
 
+  std::unordered_map<const MethodItemEntry*, const MethodItemEntry*> matches;
+  std::unordered_map<const MethodItemEntry*, const MethodItemEntry*>
+      delayed_matches;
+  auto may_match = [&](const MethodItemEntry* mie1,
+                       const MethodItemEntry* mie2) {
+    always_assert(mie1 && mie1->type != MFLOW_DEBUG &&
+                  mie1->type != MFLOW_POSITION &&
+                  mie1->type != MFLOW_SOURCE_BLOCK);
+    always_assert(mie2 && mie2->type != MFLOW_DEBUG &&
+                  mie2->type != MFLOW_POSITION &&
+                  mie2->type != MFLOW_SOURCE_BLOCK);
+    auto it = matches.find(mie1);
+    if (it != matches.end()) {
+      return it->second == mie2;
+    }
+    auto p = delayed_matches.emplace(mie1, mie2);
+    return p.second || p.first->second == mie2;
+  };
   for (; it1 != m_list.end() && it2 != other.end();) {
     always_assert(it1->type != MFLOW_DEX_OPCODE);
     always_assert(it2->type != MFLOW_DEX_OPCODE);
-    // Skip debug and position
-    if (it1->type == MFLOW_DEBUG || it1->type == MFLOW_POSITION) {
+    // Skip debug, position, and source block
+    if (it1->type == MFLOW_DEBUG || it1->type == MFLOW_POSITION ||
+        it1->type == MFLOW_SOURCE_BLOCK) {
       ++it1;
       continue;
     }
 
-    if (it2->type == MFLOW_DEBUG || it2->type == MFLOW_POSITION) {
+    if (it2->type == MFLOW_DEBUG || it2->type == MFLOW_POSITION ||
+        it2->type == MFLOW_SOURCE_BLOCK) {
       ++it2;
       continue;
     }
@@ -472,8 +705,17 @@ bool IRList::structural_equals(const IRList& other) const {
       return false;
     }
 
+    auto it = delayed_matches.find(&*it1);
+    if (it != delayed_matches.end()) {
+      if (it->second != &*it2) {
+        return false;
+      }
+      delayed_matches.erase(it);
+    }
+    matches.emplace(&*it1, &*it2);
+
     if (it1->type == MFLOW_OPCODE) {
-      if (*it1->insn != *it2->insn) {
+      if (!instruction_equals(*it1->insn, *it2->insn)) {
         return false;
       }
     } else if (it1->type == MFLOW_TARGET) {
@@ -490,7 +732,7 @@ bool IRList::structural_equals(const IRList& other) const {
       }
 
       // Do these targets point back to the same branch instruction?
-      if (this->index_of(*target1->src) != other.index_of(*target2->src)) {
+      if (!may_match(target1->src, target2->src)) {
         return false;
       }
 
@@ -503,8 +745,7 @@ bool IRList::structural_equals(const IRList& other) const {
       }
 
       // Do these `try`s correspond to the same catch block?
-      if (this->index_of(*try1->catch_start) !=
-          other.index_of(*try2->catch_start)) {
+      if (!may_match(try1->catch_start, try2->catch_start)) {
         return false;
       }
     } else if (it1->type == MFLOW_CATCH) {
@@ -521,8 +762,7 @@ bool IRList::structural_equals(const IRList& other) const {
       }
 
       // Do these `catch`es have the same catch after them?
-      if (catch1->next != nullptr &&
-          this->index_of(*catch1->next) != other.index_of(*catch2->next)) {
+      if (catch1->next != nullptr && may_match(catch1->next, catch2->next)) {
         return false;
       }
     }
@@ -530,7 +770,11 @@ bool IRList::structural_equals(const IRList& other) const {
     ++it2;
   }
 
-  return it1 == this->end() && it2 == other.end();
+  if (it1 == this->end() && it2 == other.end()) {
+    always_assert(delayed_matches.empty());
+    return true;
+  }
+  return false;
 }
 
 boost::sub_range<IRList> IRList::get_param_instructions() {
@@ -538,7 +782,7 @@ boost::sub_range<IRList> IRList::get_param_instructions() {
       m_list.begin(), m_list.end(), [&](const MethodItemEntry& mie) {
         return mie.type == MFLOW_FALLTHROUGH ||
                (mie.type == MFLOW_OPCODE &&
-                opcode::is_load_param(mie.insn->opcode()));
+                opcode::is_a_load_param(mie.insn->opcode()));
       });
   return boost::sub_range<IRList>(m_list.begin(), params_end);
 }
@@ -560,7 +804,13 @@ void IRList::gather_types(std::vector<DexType*>& ltype) const {
   }
 }
 
-void IRList::gather_strings(std::vector<DexString*>& lstring) const {
+void IRList::gather_init_classes(std::vector<DexType*>& ltype) const {
+  for (auto& mie : m_list) {
+    mie.gather_init_classes(ltype);
+  }
+}
+
+void IRList::gather_strings(std::vector<const DexString*>& lstring) const {
   for (auto& mie : m_list) {
     mie.gather_strings(lstring);
   }
@@ -578,14 +828,26 @@ void IRList::gather_methods(std::vector<DexMethodRef*>& lmethod) const {
   }
 }
 
+void IRList::gather_callsites(std::vector<DexCallSite*>& lcallsite) const {
+  for (auto& mie : m_list) {
+    mie.gather_callsites(lcallsite);
+  }
+}
+
+void IRList::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  for (auto& mie : m_list) {
+    mie.gather_methodhandles(lmethodhandle);
+  }
+}
+
 IRList::iterator IRList::main_block() {
   return std::prev(get_param_instructions().end());
 }
 
-IRList::iterator IRList::make_if_block(
-    IRList::iterator cur,
-    IRInstruction* insn,
-    IRList::iterator* false_block) {
+IRList::iterator IRList::make_if_block(const IRList::iterator& cur,
+                                       IRInstruction* insn,
+                                       IRList::iterator* false_block) {
   auto if_entry = new MethodItemEntry(insn);
   *false_block = m_list.insert(cur, *if_entry);
   auto bt = new BranchTarget(if_entry);
@@ -593,11 +855,10 @@ IRList::iterator IRList::make_if_block(
   return m_list.insert(m_list.end(), *bentry);
 }
 
-IRList::iterator IRList::make_if_else_block(
-    IRList::iterator cur,
-    IRInstruction* insn,
-    IRList::iterator* false_block,
-    IRList::iterator* true_block) {
+IRList::iterator IRList::make_if_else_block(const IRList::iterator& cur,
+                                            IRInstruction* insn,
+                                            IRList::iterator* false_block,
+                                            IRList::iterator* true_block) {
   // if block
   auto if_entry = new MethodItemEntry(insn);
   *false_block = m_list.insert(cur, *if_entry);
@@ -620,7 +881,7 @@ IRList::iterator IRList::make_if_else_block(
 }
 
 IRList::iterator IRList::make_switch_block(
-    IRList::iterator cur,
+    const IRList::iterator& cur,
     IRInstruction* insn,
     IRList::iterator* default_block,
     std::map<SwitchIndices, IRList::iterator>& cases) {
@@ -649,8 +910,7 @@ IRList::iterator IRList::make_switch_block(
 
 namespace ir_list {
 
-IRInstruction* primary_instruction_of_move_result_pseudo(
-    IRList::iterator it) {
+IRInstruction* primary_instruction_of_move_result_pseudo(IRList::iterator it) {
   --it;
   always_assert_log(it->type == MFLOW_OPCODE &&
                         it->insn->has_move_result_pseudo(),
@@ -658,11 +918,105 @@ IRInstruction* primary_instruction_of_move_result_pseudo(
   return it->insn;
 }
 
+IRInstruction* primary_instruction_of_move_result(IRList::iterator it) {
+  // There may be debug info between primary insn and move-result*?
+  do {
+    --it;
+  } while (it->type != MFLOW_OPCODE);
+  always_assert_log(it->insn->has_move_result(),
+                    "%s does not have a move result", SHOW(*it));
+  return it->insn;
+}
+
 IRInstruction* move_result_pseudo_of(IRList::iterator it) {
   ++it;
   always_assert(it->type == MFLOW_OPCODE &&
-                opcode::is_move_result_pseudo(it->insn->opcode()));
+                opcode::is_a_move_result_pseudo(it->insn->opcode()));
   return it->insn;
 }
 
 } // namespace ir_list
+
+IRList::iterator IRList::insn_erase_and_dispose(const IRList::iterator& it) {
+  return m_list.erase_and_dispose(it, [](auto* mie) {
+    if (mie->type == MFLOW_OPCODE) {
+      delete mie->insn;
+    }
+    delete mie;
+  });
+}
+
+void IRList::insn_clear_and_dispose() {
+  m_list.clear_and_dispose([](auto* mie) {
+    if (mie->type == MFLOW_OPCODE) {
+      delete mie->insn;
+    }
+    delete mie;
+  });
+}
+
+std::string SourceBlock::show(bool quoted_src) const {
+  std::ostringstream o;
+
+  for (const auto* cur = this; cur != nullptr; cur = cur->next.get()) {
+    if (cur != this) {
+      o << " ";
+    }
+    if (quoted_src) {
+      o << "\"";
+    }
+    o << ::show(cur->src);
+    if (quoted_src) {
+      o << "\"";
+    }
+    o << "@" << cur->id;
+    o << "(";
+    for (size_t i = 0; i != cur->vals_size; ++i) {
+      auto& val = cur->vals[i];
+      if (val) {
+        o << val->val << ":" << val->appear100;
+      } else {
+        o << "x";
+      }
+      o << "|";
+    }
+    o << ")";
+  }
+  return o.str();
+}
+
+IRList::ConsecutiveStyle IRList::CONSECUTIVE_STYLE =
+    IRList::ConsecutiveStyle::kMax;
+
+void IRList::chain_consecutive_source_blocks(ConsecutiveStyle style) {
+  boost::optional<IRList::iterator> last_it = boost::none;
+  for (auto it = begin(); it != end(); ++it) {
+    if (it->type == MFLOW_POSITION || it->type == MFLOW_DEBUG) {
+      // We can move over debug info. Otherwise, reset.
+      continue;
+    }
+    if (it->type != MFLOW_SOURCE_BLOCK) {
+      last_it = boost::none;
+      continue;
+    }
+
+    if (last_it) {
+      switch (style) {
+      case ConsecutiveStyle::kChain:
+        (*last_it)->src_block->append(std::move(it->src_block));
+        break;
+      case ConsecutiveStyle::kDrop:
+        break;
+      case ConsecutiveStyle::kMax:
+        (*last_it)->src_block->max(*it->src_block);
+        break;
+      }
+
+      auto prev = std::prev(it);
+      erase_and_dispose(it);
+      it = prev;
+    } else {
+      last_it = it;
+    }
+  }
+}

@@ -1,47 +1,213 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "IRInstruction.h"
 
+#include "DexCallSite.h"
 #include "DexClass.h"
+#include "DexInstruction.h"
+#include "DexMethodHandle.h"
 #include "DexUtil.h"
+#include "Show.h"
 
-DexOpcode convert_2to3addr(DexOpcode op) {
-  always_assert(op >= DOPCODE_ADD_INT_2ADDR && op <= DOPCODE_REM_DOUBLE_2ADDR);
-  constexpr uint16_t offset = DOPCODE_ADD_INT_2ADDR - DOPCODE_ADD_INT;
-  return (DexOpcode)(op - offset);
-}
-
-DexOpcode convert_3to2addr(DexOpcode op) {
-  always_assert(op >= DOPCODE_ADD_INT && op <= DOPCODE_REM_DOUBLE);
-  constexpr uint16_t offset = DOPCODE_ADD_INT_2ADDR - DOPCODE_ADD_INT;
-  return (DexOpcode)(op + offset);
-}
+#include <boost/range/any_range.hpp>
+#include <cstring>
+#include <iterator>
 
 IRInstruction::IRInstruction(IROpcode op) : m_opcode(op) {
-  m_srcs.resize(opcode_impl::min_srcs_size(op));
+  auto count = opcode_impl::min_srcs_size(op);
+  m_num_srcs = count;
+  if (count > MAX_NUM_INLINE_SRCS) {
+    always_assert(count < std::numeric_limits<src_index_t>::max());
+    m_srcs = new reg_t[count];
+  }
+}
+
+IRInstruction::IRInstruction(const IRInstruction& other)
+    : m_opcode(other.m_opcode),
+      m_num_srcs(other.m_num_srcs),
+      m_dest(other.m_dest),
+      m_literal(other.m_literal) {
+  if (m_num_srcs <= MAX_NUM_INLINE_SRCS) {
+    for (src_index_t i = 0; i < m_num_srcs; ++i) {
+      m_inline_srcs[i] = other.m_inline_srcs[i];
+    }
+  } else {
+    m_srcs = new reg_t[m_num_srcs];
+    std::memcpy(m_srcs, other.m_srcs, m_num_srcs * sizeof(reg_t));
+  }
+  if (other.has_data()) {
+    m_data = other.m_data->clone();
+  }
+}
+
+IRInstruction::~IRInstruction() {
+  if (m_num_srcs > MAX_NUM_INLINE_SRCS) {
+    delete[] m_srcs;
+  }
+  if (has_data()) {
+    delete m_data;
+  }
+}
+
+IRInstruction* IRInstruction::set_data(std::unique_ptr<DexOpcodeData> data) {
+  always_assert(has_data());
+  delete m_data;
+  m_data = data.release();
+  return this;
 }
 
 // Structural equality of opcodes except branches offsets are ignored
 // because they are unknown until we sync back to DexInstructions.
 bool IRInstruction::operator==(const IRInstruction& that) const {
-  return m_opcode == that.m_opcode &&
-    m_string == that.m_string && // just test one member of the union
-    m_srcs == that.m_srcs &&
-    m_dest == that.m_dest &&
-    m_literal == that.m_literal;
+  bool simple_fields_match = m_opcode == that.m_opcode &&
+                             m_num_srcs == that.m_num_srcs &&
+                             m_dest == that.m_dest;
+  if (!simple_fields_match) {
+    return false;
+  }
+
+  // Avoid calling opcode::ref(); there's only one instruction that has data.
+  if (m_opcode == OPCODE_FILL_ARRAY_DATA) {
+    // NOLINTNEXTLINE(bugprone-assert-side-effect) No side effect here.
+    redex_assert(opcode::ref(m_opcode) == opcode::Ref::Data);
+    auto size = m_data->data_size();
+    if (size != that.m_data->data_size() ||
+        std::memcmp(m_data->data(),
+                    that.m_data->data(),
+                    size * sizeof(uint16_t)) != 0) {
+      return false;
+    }
+  } else {
+    // NOLINTNEXTLINE(bugprone-assert-side-effect) No side effect here.
+    redex_assert(opcode::ref(m_opcode) != opcode::Ref::Data);
+    if (m_literal != that.m_literal) { // just test one member of the union
+      return false;
+    }
+  }
+
+  // Check the source registers union
+  if (m_num_srcs <= MAX_NUM_INLINE_SRCS) {
+    for (src_index_t i = 0; i < m_num_srcs; ++i) {
+      if (m_inline_srcs[i] != that.m_inline_srcs[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return std::memcmp(m_srcs, that.m_srcs, m_num_srcs * sizeof(reg_t)) == 0;
+}
+
+reg_t IRInstruction::src(src_index_t i) const {
+  always_assert(i < m_num_srcs);
+  if (m_num_srcs <= MAX_NUM_INLINE_SRCS) {
+    return m_inline_srcs[i];
+  }
+  return m_srcs[i];
+}
+
+IRInstruction::reg_range IRInstruction::srcs() const {
+  const reg_t* begin =
+      m_num_srcs <= MAX_NUM_INLINE_SRCS ? std::begin(m_inline_srcs) : m_srcs;
+  const reg_t* end = begin + m_num_srcs;
+  return reg_range(begin, end);
+}
+
+std::vector<reg_t> IRInstruction::srcs_copy() const {
+  std::vector<reg_t> result;
+  result.reserve(srcs_size());
+  for (reg_t src : srcs()) {
+    result.push_back(src);
+  }
+  return result;
+}
+
+IRInstruction* IRInstruction::set_srcs(const reg_range& r) {
+  if (r.size() != m_num_srcs) {
+    if (m_num_srcs > MAX_NUM_INLINE_SRCS) {
+      delete[] m_srcs;
+    }
+    if (r.size() > MAX_NUM_INLINE_SRCS) {
+      always_assert(r.size() < std::numeric_limits<src_index_t>::max());
+      m_srcs = new reg_t[r.size()];
+    }
+  }
+  if (r.size() <= MAX_NUM_INLINE_SRCS) {
+    for (src_index_t i = 0; i < r.size(); ++i) {
+      m_inline_srcs[i] = r[i];
+    }
+  } else {
+    for (src_index_t i = 0; i < r.size(); ++i) {
+      m_srcs[i] = r[i];
+    }
+  }
+  m_num_srcs = r.size();
+  return this;
+}
+
+IRInstruction* IRInstruction::set_src(src_index_t i, reg_t reg) {
+  always_assert(i < m_num_srcs);
+  if (m_num_srcs <= MAX_NUM_INLINE_SRCS) {
+    m_inline_srcs[i] = reg;
+  } else {
+    m_srcs[i] = reg;
+  }
+  return this;
+}
+
+size_t IRInstruction::srcs_size() const { return m_num_srcs; }
+
+IRInstruction* IRInstruction::set_srcs_size(size_t count) {
+  if (m_num_srcs <= MAX_NUM_INLINE_SRCS) {
+    if (count <= MAX_NUM_INLINE_SRCS) {
+      // staying in the inline regs state
+      for (src_index_t i = m_num_srcs; i < count; ++i) {
+        m_inline_srcs[i] = 0;
+      }
+    } else {
+      // inline regs -> array
+      always_assert(count < std::numeric_limits<src_index_t>::max());
+      auto* srcs = new reg_t[count];
+      for (src_index_t i = 0; i < m_num_srcs; ++i) {
+        srcs[i] = m_inline_srcs[i];
+      }
+      std::memset(srcs + m_num_srcs, 0, (count - m_num_srcs) * sizeof(reg_t));
+      m_srcs = srcs;
+    }
+  } else {
+    if (count <= MAX_NUM_INLINE_SRCS) {
+      // array -> inline regs
+      auto old_srcs = m_srcs;
+      for (src_index_t i = 0; i < count; ++i) {
+        m_inline_srcs[i] = old_srcs[i];
+      }
+      delete[] old_srcs;
+    } else if (count != m_num_srcs) {
+      // staying in the array state
+      always_assert(count < std::numeric_limits<src_index_t>::max());
+      auto* srcs = new reg_t[count];
+      auto copy_count = std::min((src_index_t)count, m_num_srcs);
+      std::memcpy(srcs, m_srcs, copy_count * sizeof(reg_t));
+      std::memset(srcs + copy_count, 0, (count - copy_count) * sizeof(reg_t));
+      delete[] m_srcs;
+      m_srcs = srcs;
+    }
+  }
+  m_num_srcs = count;
+  return this;
 }
 
 uint16_t IRInstruction::size() const {
   auto op = m_opcode;
-  if (opcode::is_internal(op)) {
-    return 0;
+  if (opcode::is_write_barrier(op)) {
+    op = OPCODE_INVOKE_STATIC;
+  }
+  if (opcode::is_an_internal(op)) {
+    return opcode::is_injection_id(op) ? 2 : opcode::is_unreachable(op) ? 1 : 0;
   }
   static int args[] = {
       0, /* FMT_f00x   */
@@ -93,12 +259,12 @@ uint16_t IRInstruction::size() const {
 
 // The instruction format doesn't tell us the width of registers for invoke
 // so we inspect the signature of the method we're calling
-bool IRInstruction::invoke_src_is_wide(size_t i) const {
+bool IRInstruction::invoke_src_is_wide(src_index_t i) const {
   always_assert(has_method());
 
   // virtual methods have `this` as the 0th register argument, but the
   // arg list does NOT include `this`
-  if (!is_invoke_static(m_opcode)) {
+  if (!opcode::is_invoke_static(m_opcode)) {
     if (i == 0) {
       // reference to `this`. References are never wide
       return false;
@@ -106,14 +272,13 @@ bool IRInstruction::invoke_src_is_wide(size_t i) const {
     --i;
   }
 
-  const auto& args = m_method->get_proto()->get_args()->get_type_list();
-  return is_wide_type(args.at(i));
+  return type::is_wide_type(m_method->get_proto()->get_args()->at(i));
 }
 
-bool IRInstruction::src_is_wide(size_t i) const {
+bool IRInstruction::src_is_wide(src_index_t i) const {
   always_assert(i < srcs_size());
 
-  if (is_invoke(m_opcode)) {
+  if (opcode::is_an_invoke(m_opcode)) {
     return invoke_src_is_wide(i);
   }
 
@@ -168,73 +333,73 @@ bool IRInstruction::src_is_wide(size_t i) const {
   }
 }
 
-void IRInstruction::normalize_registers() {
-  if (is_invoke(opcode())) {
-    auto& args = get_method()->get_proto()->get_args()->get_type_list();
+bool IRInstruction::normalize_registers(std::string* error_msg) {
+  if (opcode::is_an_invoke(opcode())) {
+    auto* args = get_method()->get_proto()->get_args();
     size_t old_srcs_idx{0};
     size_t srcs_idx{0};
     if (m_opcode != OPCODE_INVOKE_STATIC) {
       ++srcs_idx;
       ++old_srcs_idx;
     }
-    for (size_t args_idx = 0; args_idx < args.size(); ++args_idx) {
-      always_assert_log(
-          old_srcs_idx < srcs_size(),
-          "Invalid arg indices in %s args_idx %d old_srcs_idx %d\n",
-          SHOW(this),
-          args_idx,
-          old_srcs_idx);
+    for (size_t args_idx = 0; args_idx < args->size(); ++args_idx) {
+      if (old_srcs_idx >= srcs_size()) {
+        if (error_msg != nullptr) {
+          *error_msg = "Invalid arg indices in " + show(this);
+        }
+        return false;
+      }
       set_src(srcs_idx++, src(old_srcs_idx));
-      old_srcs_idx += is_wide_type(args.at(args_idx)) ? 2 : 1;
+      old_srcs_idx += type::is_wide_type(args->at(args_idx)) ? 2 : 1;
     }
-    always_assert(old_srcs_idx == srcs_size());
-    set_arg_word_count(srcs_idx);
+    if (old_srcs_idx != srcs_size()) {
+      if (error_msg != nullptr) {
+        *error_msg = "Number of registers wrong in " + show(this);
+      }
+      return false;
+    }
+    set_srcs_size(srcs_idx);
   }
+  return true;
 }
 
 void IRInstruction::denormalize_registers() {
-  if (is_invoke(m_opcode)) {
-    auto& args = get_method()->get_proto()->get_args()->get_type_list();
-    std::vector<uint16_t> srcs;
-    size_t args_idx {0};
-    size_t srcs_idx {0};
+  if (opcode::is_an_invoke(m_opcode)) {
+    auto* args = get_method()->get_proto()->get_args();
+    bool has_wide = false;
+    for (const auto& arg : *args) {
+      if (type::is_wide_type(arg)) {
+        has_wide = true;
+        break;
+      }
+    }
+    if (!has_wide) {
+      return;
+    }
+
+    std::vector<reg_t> srcs;
+    size_t args_idx{0};
+    size_t srcs_idx{0};
     if (m_opcode != OPCODE_INVOKE_STATIC) {
       srcs.push_back(src(srcs_idx++));
     }
-    bool has_wide {false};
-    for (; args_idx < args.size(); ++args_idx, ++srcs_idx) {
+    for (; args_idx < args->size(); ++args_idx, ++srcs_idx) {
       srcs.push_back(src(srcs_idx));
-      if (is_wide_type(args.at(args_idx))) {
+      if (type::is_wide_type(args->at(args_idx))) {
         srcs.push_back(src(srcs_idx) + 1);
-        has_wide = true;
       }
     }
-    if (has_wide) {
-      m_srcs = srcs;
-    }
+
+    set_srcs(srcs);
   }
 }
 
 bit_width_t required_bit_width(uint16_t v) {
-  bit_width_t result {1};
+  bit_width_t result{1};
   while (v >>= 1) {
     ++result;
   }
   return result;
-}
-
-bool has_contiguous_srcs(const IRInstruction* insn) {
-  if (insn->srcs_size() == 0) {
-    return true;
-  }
-  auto last = insn->src(0);
-  for (size_t i = 1; i < insn->srcs_size(); ++i) {
-    if (insn->src(i) - last != 1) {
-      return false;
-    }
-    last = insn->src(i);
-  }
-  return true;
 }
 
 bool needs_range_conversion(const IRInstruction* insn) {
@@ -245,7 +410,7 @@ bool needs_range_conversion(const IRInstruction* insn) {
   if (insn->srcs_size() > dex_opcode::NON_RANGE_MAX) {
     return true;
   }
-  always_assert(!opcode::is_internal(op));
+  always_assert(!opcode::is_an_internal(op));
   auto dex_op = opcode::to_dex_opcode(op);
   for (size_t i = 0; i < insn->srcs_size(); ++i) {
     if (required_bit_width(insn->src(i)) >
@@ -256,45 +421,108 @@ bool needs_range_conversion(const IRInstruction* insn) {
   return false;
 }
 
-uint64_t IRInstruction::hash() {
-  std::vector<uint64_t> bits;
-  bits.push_back(opcode());
+uint64_t IRInstruction::hash() const {
+  uint64_t result = opcode();
 
   for (size_t i = 0; i < srcs_size(); i++) {
-    bits.push_back(src(i));
+    result ^= src(i);
   }
 
-  if (dests_size() > 0) {
-    bits.push_back(dest());
+  if (has_dest()) {
+    result ^= dest();
   }
 
-  if (has_data()) {
+  switch (opcode::ref(opcode())) {
+  case opcode::Ref::Data: {
     size_t size = get_data()->data_size();
     const auto& data = get_data()->data();
     for (size_t i = 0; i < size; i++) {
-      bits.push_back(data[i]);
+      result ^= data[i];
     }
+    break;
+  }
+  case opcode::Ref::Proto:
+  case opcode::Ref::CallSite:
+  case opcode::Ref::MethodHandle:
+  case opcode::Ref::Field:
+  case opcode::Ref::Method:
+  case opcode::Ref::Literal:
+  case opcode::Ref::String:
+  case opcode::Ref::Type: {
+    result ^= m_literal;
+    break;
+  }
+  case opcode::Ref::None:
+    break;
   }
 
-  if (has_type()) {
-    bits.push_back(reinterpret_cast<uint64_t>(get_type()));
-  }
-  if (has_field()) {
-    bits.push_back(reinterpret_cast<uint64_t>(get_field()));
-  }
-  if (has_method()) {
-    bits.push_back(reinterpret_cast<uint64_t>(get_method()));
-  }
-  if (has_string()) {
-    bits.push_back(reinterpret_cast<uint64_t>(get_string()));
-  }
-  if (has_literal()) {
-    bits.push_back(get_literal());
-  }
-
-  uint64_t result = 0;
-  for (uint64_t elem : bits) {
-    result ^= elem;
-  }
   return result;
 }
+
+void IRInstruction::gather_init_classes(std::vector<DexType*>& ltype) const {
+  auto type = get_init_class_type_demand(this);
+  if (type) {
+    ltype.push_back(const_cast<DexType*>(type));
+  }
+}
+
+void IRInstruction::gather_types(std::vector<DexType*>& ltype) const {
+  switch (opcode::ref(opcode())) {
+  case opcode::Ref::None:
+  case opcode::Ref::String:
+  case opcode::Ref::Literal:
+  case opcode::Ref::Data:
+  case opcode::Ref::CallSite:
+  case opcode::Ref::MethodHandle:
+  case opcode::Ref::Proto:
+    break;
+
+  case opcode::Ref::Type:
+    ltype.push_back(m_type);
+    break;
+
+  case opcode::Ref::Field:
+    m_field->gather_types_shallow(ltype);
+    break;
+
+  case opcode::Ref::Method:
+    m_method->gather_types_shallow(ltype);
+    break;
+  }
+}
+
+void IRInstruction::gather_fields(std::vector<DexFieldRef*>& lfield) const {
+  if (has_field()) {
+    lfield.push_back(m_field);
+  }
+  if (has_callsite()) {
+    m_callsite->gather_fields(lfield);
+  }
+  if (has_methodhandle()) {
+    m_methodhandle->gather_fields(lfield);
+  }
+}
+
+void IRInstruction::gather_methods(std::vector<DexMethodRef*>& lmethod) const {
+  if (has_method()) {
+    lmethod.push_back(m_method);
+  }
+  if (has_callsite()) {
+    m_callsite->gather_methods(lmethod);
+  }
+  if (has_methodhandle()) {
+    m_methodhandle->gather_methods(lmethod);
+  }
+}
+
+void IRInstruction::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  if (has_methodhandle()) {
+    lmethodhandle.push_back(m_methodhandle);
+  }
+  if (has_callsite()) {
+    m_callsite->gather_methodhandles(lmethodhandle);
+  }
+}
+
+std::string IRInstruction::show_opcode() const { return show(m_opcode); }

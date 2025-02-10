@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <stdio.h>
@@ -13,20 +11,10 @@
 
 #include "DexAnnotation.h"
 #include "DexUtil.h"
+#include "Show.h"
 #include "SingleImplDefs.h"
 
 namespace {
-
-// cache the java.lang.Object type
-DexType* object_type = nullptr;
-bool is_object(DexType* type) {
-  if (object_type) return type == object_type;
-  if (strcmp(type->get_name()->c_str(), "Ljava/lang/Object;") == 0) {
-    object_type = type;
-    return true;
-  }
-  return false;
-}
 
 bool is_digit(char c) { return c >= '0' && c <= '9'; }
 
@@ -84,7 +72,7 @@ void breakup_by_package(SingleImpls& single_impls) {
   };
   std::vector<PackageBreakUp> by_package;
   uint32_t no_package_types = 0;
-  for (auto const intf_it : single_impls) {
+  for (auto const& intf_it : single_impls) {
     const auto intf_name = intf_it.first->get_name()->c_str();
     auto ptr = const_cast<char*>(intf_name);
     if (*ptr != 'L') {
@@ -158,8 +146,8 @@ void class_type_stats(SingleImpls& single_impls) {
     auto nested_cls = false;
     if (!anon) nested_cls = is_nested(name);
     const auto& cls = type_class(intf_it.second.cls);
-    if (is_object(cls->get_super_class()) &&
-        cls->get_interfaces()->get_type_list().size() == 0) {
+    if (type::is_object(cls->get_super_class()) &&
+        cls->get_interfaces()->empty()) {
       if (anon) {
         anonymous_no_parent << "+ " << show(cls) << "\n";
         anonymous_no_parent_count++;
@@ -221,7 +209,7 @@ void class_type_stats(SingleImpls& single_impls) {
           "top level single implemented with parent:\n%s",
           top_level.str().c_str());
 }
-}
+} // namespace
 
 void print_stats(SingleImpls& single_impls) {
   // interface stats

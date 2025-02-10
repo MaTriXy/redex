@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -22,7 +20,8 @@
 
 namespace cfg {
 class ControlFlowGraph;
-}
+struct LinearizationStrategy;
+} // namespace cfg
 
 // TODO(jezng): IRCode currently contains too many methods that shouldn't
 // belong there... I'm going to move them out soon
@@ -44,25 +43,31 @@ class IRCode {
   IRList* m_ir_list;
   std::unique_ptr<cfg::ControlFlowGraph> m_cfg;
 
-  uint16_t m_registers_size{0};
+  reg_t m_registers_size{0};
+  bool m_cfg_serialized_with_custom_strategy = false;
+
+  // Hack: in general the IRCode is not handled as owning instructions, as they
+  //       might be shared. Toggle to true via `set_insn_ownership` to destruct
+  //       instructions on delete.
+  bool m_owns_insns{true};
+
   // TODO(jezng): we shouldn't be storing / exposing the DexDebugItem... just
   // exposing the param names should be enough
   std::unique_ptr<DexDebugItem> m_dbg;
 
-  IRList::iterator main_block() { return m_ir_list->main_block(); }
-  IRList::iterator make_if_block(IRList::iterator cur,
+  IRList::iterator make_if_block(const IRList::iterator& cur,
                                  IRInstruction* insn,
                                  IRList::iterator* if_block) {
     return m_ir_list->make_if_block(cur, insn, if_block);
   }
-  IRList::iterator make_if_else_block(IRList::iterator cur,
+  IRList::iterator make_if_else_block(const IRList::iterator& cur,
                                       IRInstruction* insn,
                                       IRList::iterator* if_block,
                                       IRList::iterator* else_block) {
     return m_ir_list->make_if_else_block(cur, insn, if_block, else_block);
   }
   IRList::iterator make_switch_block(
-      IRList::iterator cur,
+      const IRList::iterator& cur,
       IRInstruction* insn,
       IRList::iterator* default_block,
       std::map<SwitchIndices, IRList::iterator>& cases) {
@@ -78,6 +83,13 @@ class IRCode {
   IRCode();
 
   explicit IRCode(DexMethod*);
+
+  // Same as constructor above but better for error-handling purposes. New
+  // code should use this method.
+  static std::unique_ptr<IRCode> for_method(DexMethod* method);
+
+  explicit IRCode(std::unique_ptr<cfg::ControlFlowGraph>);
+
   /*
    * Construct an IRCode for a DexMethod that has no DexCode (that is, a new
    * method that we are creating instead of something from an input dex file.)
@@ -94,18 +106,28 @@ class IRCode {
 
   ~IRCode();
 
-  bool structural_equals(const IRCode& other) {
-    return m_ir_list->structural_equals(*other.m_ir_list);
+  void set_insn_ownership(bool owns_insns) { m_owns_insns = owns_insns; }
+
+  bool structural_equals(const IRCode& other) const {
+    return m_ir_list->structural_equals(*other.m_ir_list,
+                                        std::equal_to<const IRInstruction&>());
   }
 
-  uint16_t get_registers_size() const { return m_registers_size; }
+  bool structural_equals(const IRCode& other,
+                         const InstructionEquality& instruction_equals) const {
+    return m_ir_list->structural_equals(*other.m_ir_list, instruction_equals);
+  }
 
-  void set_registers_size(uint16_t sz) { m_registers_size = sz; }
+  void cleanup_debug();
 
-  uint16_t allocate_temp() { return m_registers_size++; }
+  reg_t get_registers_size() const { return m_registers_size; }
 
-  uint16_t allocate_wide_temp() {
-    uint16_t new_reg = m_registers_size;
+  void set_registers_size(reg_t sz) { m_registers_size = sz; }
+
+  reg_t allocate_temp() { return m_registers_size++; }
+
+  reg_t allocate_wide_temp() {
+    reg_t new_reg = m_registers_size;
     m_registers_size += 2;
     return new_reg;
   }
@@ -127,23 +149,15 @@ class IRCode {
     return std::move(m_dbg);
   }
 
-  void gather_catch_types(std::vector<DexType*>& ltype) const {
-    m_ir_list->gather_catch_types(ltype);
-    if (m_dbg) m_dbg->gather_types(ltype);
-  }
-  void gather_strings(std::vector<DexString*>& lstring) const {
-    m_ir_list->gather_strings(lstring);
-    if (m_dbg) m_dbg->gather_strings(lstring);
-  }
-  void gather_types(std::vector<DexType*>& ltype) const {
-    m_ir_list->gather_types(ltype);
-  }
-  void gather_fields(std::vector<DexFieldRef*>& lfield) const {
-    m_ir_list->gather_fields(lfield);
-  }
-  void gather_methods(std::vector<DexMethodRef*>& lmethod) const {
-    m_ir_list->gather_methods(lmethod);
-  }
+  void gather_catch_types(std::vector<DexType*>& ltype) const;
+  void gather_strings(std::vector<const DexString*>& lstring) const;
+  void gather_types(std::vector<DexType*>& ltype) const;
+  void gather_fields(std::vector<DexFieldRef*>& lfield) const;
+  void gather_methods(std::vector<DexMethodRef*>& lmethod) const;
+  void gather_callsites(std::vector<DexCallSite*>& lcallsite) const;
+  void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
+
+  void gather_init_classes(std::vector<DexType*>& ltype) const;
 
   /* Return the control flow graph of this method as a vector of blocks. */
   cfg::ControlFlowGraph& cfg() { return *m_cfg; }
@@ -156,24 +170,47 @@ class IRCode {
   //  * An editable CFG's blocks each own a small IRList (with
   //    MethodItemEntries taken from IRCode)
   // Changes to an editable CFG are reflected in IRCode after `clear_cfg` is
-  // called
-  void build_cfg(bool editable = false);
+  // called. For editable cfg, it is only rebuilt when the flag
+  // rebuild_editable_even_if_already_built is true. Otherwise, the current
+  // editable cfg will be kept.
+  void build_cfg(bool editable = true,
+                 bool rebuild_editable_even_if_already_built = true);
 
   // if the cfg was editable, linearize it back into m_ir_list
-  void clear_cfg();
+  // custom_strategy controls the linearization of the CFG.
+  //
+  // The CFG may have stored instructions that were removed. If deleted_insns is
+  // not null, the instructions are moved into the given vector. It is then the
+  // caller's responsibility to free them.
+  void clear_cfg(const std::unique_ptr<cfg::LinearizationStrategy>&
+                     custom_strategy = nullptr,
+                 std::vector<IRInstruction*>* deleted_insns = nullptr);
+
+  bool cfg_built() const;
+  bool editable_cfg_built() const;
 
   /* Generate DexCode from IRCode */
   std::unique_ptr<DexCode> sync(const DexMethod*);
 
+  /* DEPRECATED! Use the version below that passes in the iterator instead,
+   * which is O(1) instead of O(n). */
   /* Passes memory ownership of "from" to callee.  It will delete it. */
   void replace_opcode(IRInstruction* from, IRInstruction* to) {
     m_ir_list->replace_opcode(from, to);
   }
 
+  /* DEPRECATED! Use the version below that passes in the iterator instead,
+   * which is O(1) instead of O(n). */
   /* Passes memory ownership of "from" to callee.  It will delete it. */
   void replace_opcode(IRInstruction* to_delete,
-                      std::vector<IRInstruction*> replacements) {
+                      const std::vector<IRInstruction*>& replacements) {
     m_ir_list->replace_opcode(to_delete, replacements);
+  }
+
+  /* Passes memory ownership of "from" to callee.  It will delete it. */
+  void replace_opcode(const IRList::iterator& it,
+                      const std::vector<IRInstruction*>& replacements) {
+    m_ir_list->replace_opcode(it, replacements);
   }
 
   /*
@@ -251,23 +288,25 @@ class IRCode {
     m_ir_list->remove_opcode(it);
   }
 
-  /* This method will delete the switch case where insn resides. */
-  void remove_switch_case(IRInstruction* insn) {
-    m_ir_list->remove_switch_case(insn);
-  }
-
   /*
    * Returns an estimated of the number of 2-byte code units needed to encode
    * all the instructions.
    */
-  size_t sum_opcode_sizes() const { return m_ir_list->sum_opcode_sizes(); }
+  size_t sum_opcode_sizes() const;
+
+  // similar to sum_opcode_sizes, but takes into account non-opcode payloads
+  uint32_t estimate_code_units() const;
 
   /*
    * Returns the number of instructions.
    */
-  size_t count_opcodes() const { return m_ir_list->count_opcodes(); }
+  size_t count_opcodes() const;
 
   void sanity_check() const { m_ir_list->sanity_check(); }
+
+  bool has_try_blocks() const;
+
+  bool is_unreachable() const;
 
   IRList::iterator begin() { return m_ir_list->begin(); }
   IRList::iterator end() { return m_ir_list->end(); }
@@ -277,14 +316,28 @@ class IRCode {
   IRList::const_iterator cend() const { return m_ir_list->cend(); }
   IRList::reverse_iterator rbegin() { return m_ir_list->rbegin(); }
   IRList::reverse_iterator rend() { return m_ir_list->rend(); }
+  IRList::const_reverse_iterator rbegin() const { return m_ir_list->rbegin(); }
+  IRList::const_reverse_iterator rend() const { return m_ir_list->rend(); }
 
-  IRList::iterator erase(IRList::iterator it) { return m_ir_list->erase(it); }
-  IRList::iterator erase_and_dispose(IRList::iterator it) {
-    return m_ir_list->erase_and_dispose(it);
+  IRList::iterator main_block() { return m_ir_list->main_block(); }
+
+  IRList::iterator erase(const IRList::iterator& it) {
+    return m_ir_list->erase(it);
+  }
+  IRList::iterator erase_and_dispose(const IRList::iterator& it) {
+    if (m_owns_insns) {
+      return m_ir_list->insn_erase_and_dispose(it);
+    } else {
+      return m_ir_list->erase_and_dispose(it);
+    }
   }
 
   IRList::iterator iterator_to(MethodItemEntry& mie) {
     return m_ir_list->iterator_to(mie);
+  }
+
+  void chain_consecutive_source_blocks() {
+    m_ir_list->chain_consecutive_source_blocks();
   }
 
   friend std::string show(const IRCode*);

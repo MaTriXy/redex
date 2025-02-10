@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -12,7 +10,7 @@
 #include <bitset>
 #include <cstdint>
 #include <initializer_list>
-#include <ostream>
+#include <iosfwd>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -20,10 +18,11 @@
 #include <boost/container/flat_map.hpp>
 #include <boost/optional.hpp>
 
+#include <sparta/S_Expression.h>
+
 #include "ControlFlow.h"
 #include "DexClass.h"
 #include "PointsToSemanticsUtils.h"
-#include "S_Expression.h"
 #include "TypeSystem.h"
 
 /*
@@ -118,9 +117,9 @@ class PointsToVariable final {
     return PointsToVariable(this_var_id());
   }
 
-  s_expr to_s_expr() const;
+  sparta::s_expr to_s_expr() const;
 
-  static boost::optional<PointsToVariable> from_s_expr(const s_expr& e);
+  static boost::optional<PointsToVariable> from_s_expr(const sparta::s_expr& e);
 
  private:
   static constexpr int32_t null_var_id() { return -1; }
@@ -165,6 +164,7 @@ std::ostream& operator<<(std::ostream& o, const PointsToVariable& v);
  * java.lang.Class objects need to be handled specially by the analyzer.
  */
 
+// clang-format off
 //                              is_load  is_get  is_put  is_invoke
 #define PTS_OPS \
    PTS_OP(PTS_CONST_STRING,     true ,   false,  false,  false    ) \
@@ -187,8 +187,9 @@ I  PTS_OP(PTS_INVOKE_INTERFACE, false,   false,  false,  true     ) \
 I  PTS_OP(PTS_INVOKE_STATIC,    false,   false,  false,  true     ) \
 I  PTS_OP(PTS_RETURN,           false,   false,  false,  false    ) \
 I  PTS_OP(PTS_DISJUNCTION,      false,   false,  false,  false    )
+// clang-format on
 
-#define MAX_PTS_OPS sizeof(unsigned long long) * 8
+#define MAX_PTS_OPS (sizeof(unsigned long long) * 8)
 
 #define PTS_OP(OP, ...) OP
 #define I ,
@@ -210,7 +211,7 @@ struct PointsToOperation {
   union {
     DexMethodRef* dex_method;
     DexFieldRef* dex_field;
-    DexString* dex_string;
+    const DexString* dex_string;
     DexType* dex_type;
     size_t parameter;
     SpecialPointsToEdge special_edge;
@@ -226,7 +227,7 @@ struct PointsToOperation {
   PointsToOperation(PointsToOperationKind k, DexFieldRef* f)
       : kind(k), dex_field(f) {}
 
-  PointsToOperation(PointsToOperationKind k, DexString* s)
+  PointsToOperation(PointsToOperationKind k, const DexString* s)
       : kind(k), dex_string(s) {}
 
   PointsToOperation(PointsToOperationKind k, DexType* t)
@@ -240,7 +241,8 @@ struct PointsToOperation {
 
   bool is_load() const {
 #define PTS_OP(OP, is_load, is_get, is_put, is_invoke) \
-  (is_load ? (1ULL << OP) : 0)
+  ((is_load) ? (1ULL << (OP)) : 0)
+// NOLINTNEXTLINE(bugprone-macro-parentheses)
 #define I |
     static const std::bitset<MAX_PTS_OPS> load_operations(PTS_OPS);
 #undef I
@@ -254,7 +256,8 @@ struct PointsToOperation {
 
   bool is_get() const {
 #define PTS_OP(OP, is_load, is_get, is_put, is_invoke) \
-  (is_get ? (1ULL << OP) : 0)
+  ((is_get) ? (1ULL << (OP)) : 0)
+// NOLINTNEXTLINE(bugprone-macro-parentheses)
 #define I |
     static const std::bitset<MAX_PTS_OPS> get_operations(PTS_OPS);
 #undef I
@@ -266,7 +269,8 @@ struct PointsToOperation {
 
   bool is_put() const {
 #define PTS_OP(OP, is_load, is_get, is_put, is_invoke) \
-  (is_put ? (1ULL << OP) : 0)
+  ((is_put) ? (1ULL << (OP)) : 0)
+// NOLINTNEXTLINE(bugprone-macro-parentheses)
 #define I |
     static const std::bitset<MAX_PTS_OPS> put_operations(PTS_OPS);
 #undef I
@@ -278,7 +282,8 @@ struct PointsToOperation {
 
   bool is_invoke() const {
 #define PTS_OP(OP, is_load, is_get, is_put, is_invoke) \
-  (is_invoke ? (1ULL << OP) : 0)
+  ((is_invoke) ? (1ULL << (OP)) : 0)
+// NOLINTNEXTLINE(bugprone-macro-parentheses)
 #define I |
     static const std::bitset<MAX_PTS_OPS> invoke_operations(PTS_OPS);
 #undef I
@@ -294,9 +299,10 @@ struct PointsToOperation {
 
   bool is_disjunction() const { return kind == PTS_DISJUNCTION; }
 
-  s_expr to_s_expr() const;
+  sparta::s_expr to_s_expr() const;
 
-  static boost::optional<PointsToOperation> from_s_expr(const s_expr& e);
+  static boost::optional<PointsToOperation> from_s_expr(
+      const sparta::s_expr& e);
 };
 
 /*
@@ -392,9 +398,9 @@ class PointsToAction final {
                                     InputIterator first,
                                     InputIterator last);
 
-  s_expr to_s_expr() const;
+  sparta::s_expr to_s_expr() const;
 
-  static boost::optional<PointsToAction> from_s_expr(const s_expr& e);
+  static boost::optional<PointsToAction> from_s_expr(const sparta::s_expr& e);
 
  private:
   static constexpr int32_t lhs_key() { return -1; }
@@ -475,9 +481,10 @@ class PointsToMethodSemantics {
    */
   void shrink();
 
-  s_expr to_s_expr() const;
+  sparta::s_expr to_s_expr() const;
 
-  static boost::optional<PointsToMethodSemantics> from_s_expr(const s_expr& e);
+  static boost::optional<PointsToMethodSemantics> from_s_expr(
+      const sparta::s_expr& e);
 
  private:
   DexMethodRef* m_dex_method;
@@ -519,7 +526,7 @@ class PointsToSemantics final {
    * the flag `generate_stubs` is set to true, all methods in the scope are
    * interpreted as stubs.
    */
-  PointsToSemantics(const Scope& scope, bool generate_stubs = false);
+  explicit PointsToSemantics(const Scope& scope, bool generate_stubs = false);
 
   /*
    * The stubs are stored in the specified text file as S-expressions. In case
@@ -539,7 +546,7 @@ class PointsToSemantics final {
 
  private:
   MethodKind default_method_kind() const;
-  
+
   void initialize_entry(DexMethod* dex_method);
 
   void generate_points_to_actions(DexMethod* dex_method);

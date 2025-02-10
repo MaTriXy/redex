@@ -1,229 +1,75 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
 #include <algorithm>
+#include <boost/algorithm/string/predicate.hpp>
+#include <cctype>
 #include <functional>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
+#include "ClassUtil.h"
+#include "Debug.h"
 #include "DexClass.h"
+#include "DexStore.h"
 #include "IRInstruction.h"
-#include "PassManager.h"
-
-using TypeVector = std::vector<const DexType*>;
-
-/**
- * Return the DexType for java.lang.Object.
- */
-DexType* get_object_type();
+#include "MethodUtil.h"
+#include "StringUtil.h"
+#include "TypeUtil.h"
 
 /**
- * Return the DexType for a void (V) type.
+ * Given an instruction, determine which class' would get initialized, if any.
  */
-DexType* get_void_type();
+const DexType* get_init_class_type_demand(const IRInstruction* insn);
 
 /**
- * Return the DexType for a byte (B) type.
+ * Data structure to represent requested but unapplied visibility changes.
  */
-DexType* get_byte_type();
-
-/**
- * Return the DexType for a char (C) type.
- */
-DexType* get_char_type();
-
-/**
- * Return the DexType for a short (S) type.
- */
-DexType* get_short_type();
-
-/**
- * Return the DexType for an int (I) type.
- */
-DexType* get_int_type();
-
-/**
- * Return the DexType for a long (J) type.
- */
-DexType* get_long_type();
-
-/**
- * Return the DexType for a boolean (Z) type.
- */
-DexType* get_boolean_type();
-
-/**
- * Return the DexType for a float (F) type.
- */
-DexType* get_float_type();
-
-/**
- * Return the DexType for a double (D) type.
- */
-DexType* get_double_type();
-
-/**
- * Return the DexType for an java.lang.String type.
- */
-DexType* get_string_type();
-
-/**
- * Return the DexType for an java.lang.Class type.
- */
-DexType* get_class_type();
-
-/**
- * Return the DexType for an java.lang.Enum type.
- */
-DexType* get_enum_type();
-
-/**
- * Return true if the type is a primitive.
- */
-bool is_primitive(const DexType* type);
-
-/**
- * Return true if the type is either a long or a double
- */
-bool is_wide_type(const DexType* type);
-
-/**
- * Return true if method signatures (name and proto) match.
- */
-inline bool signatures_match(const DexMethodRef* a, const DexMethodRef* b) {
-  return a->get_name() == b->get_name() && a->get_proto() == b->get_proto();
-}
-
-/*
- * Return the shorty char for this type.
- * int -> I
- * bool -> Z
- * ... primitive etc.
- * any reference -> L
- */
-char type_shorty(const DexType* type);
-
-/**
- * Return true if the parent chain leads to known classes.
- * False if one of the parent is in a scope unknown to redex.
- */
-bool has_hierarchy_in_scope(DexClass* cls);
-
-/**
- * Basic datatypes used by bytecode.
- */
-enum class DataType : uint8_t {
-  Void,
-  Boolean,
-  Byte,
-  Short,
-  Char,
-  Int,
-  Long,
-  Float,
-  Double,
-  Object,
-  Array
+struct VisibilityChanges {
+  std::unordered_set<DexClass*> classes;
+  std::unordered_set<DexField*> fields;
+  std::unordered_set<DexMethod*> methods;
+  void insert(const VisibilityChanges& other);
+  void apply() const;
+  bool empty() const;
+  void clear();
 };
 
 /**
- * Return the basic datatype of given DexType.
+ * Change the visibility of members accessed in a method.
+ * We make everything public, except if a scope argument is given; then accessed
+ * members in the same scope will not be made public (We could be more precise
+ * and walk the inheritance hierarchy as needed.)
  */
-DataType type_to_datatype(const DexType* t);
-
-/**
- * Check whether a type can be cast to another type.
- * That is, if 'base_type' is an ancestor or an interface implemented by 'type'.
- * However the check is only within classes known to the app. So
- * you may effectively get false for a check_cast that would succeed at
- * runtime. Otherwise 'true' implies the type can cast.
- */
-bool check_cast(const DexType* type, const DexType* base_type);
-
-/**
- * Return true if the type is an array type.
- */
-bool is_array(const DexType* type);
-
-/**
- * Return true if the type is an object type (array types included).
- */
-bool is_object(const DexType* type);
-
-/**
- * Return true if the type is a primitive type that fits within a 32-bit
- * register, i.e., boolean, byte, char, short or int.
- */
-bool is_integer(const DexType* type);
-
-bool is_boolean(const DexType* type);
-
-bool is_long(const DexType* type);
-
-bool is_float(const DexType* type);
-
-bool is_double(const DexType* type);
-
-bool is_void(const DexType* type);
-
-/**
- * Return the level of the array type, that is the number of '[' in the array.
- * int[] => [I
- * int[][] => [[I
- * etc.
- */
-uint32_t get_array_level(const DexType* type);
-
-/**
- * Return the type of a given array type or the type itself if it's not an array
- *
- * Examples:
- *   [java.lang.String -> java.lang.String
- *   java.lang.Integer -> java.lang.Integer
- */
-const DexType* get_array_type_or_self(const DexType*);
-
-/**
- * Return the type of a given array type or nullptr if the type is not
- * an array.
- */
-DexType* get_array_type(const DexType*);
-
-/**
- * Return the array type of a given type.
- */
-DexType* make_array_type(const DexType*);
-
-/**
- * True if the method is a constructor (matches the "<init>" name)
- */
-bool is_init(const DexMethod* method);
-
-/**
- * True if the method is a static constructor (matches the "<clinit>" name)
- */
-bool is_clinit(const DexMethod* method);
-
-/**
- * Whether the method is a ctor or static ctor.
- */
-inline bool is_any_init(const DexMethod* method) {
-  return is_init(method) || is_clinit(method);
+VisibilityChanges get_visibility_changes(const DexMethod* method,
+                                         DexType* scope = nullptr);
+inline void change_visibility(const DexMethod* method,
+                              DexType* scope = nullptr) {
+  get_visibility_changes(method, scope).apply();
 }
 
-/**
- * Change the visibility of members accessed in a method.
- * We make everything public but we could be more precise and only
- * relax visibility as needed.
- */
-void change_visibility(DexMethod* method);
+// The given code can be in cfg form.
+VisibilityChanges get_visibility_changes(
+    const IRCode* code,
+    DexType* scope,
+    const DexMethod* effective_caller_resolved_from);
+inline void change_visibility(const IRCode* code,
+                              DexType* scope,
+                              const DexMethod* effective_caller_resolved_from) {
+  get_visibility_changes(code, scope, effective_caller_resolved_from).apply();
+}
+
+VisibilityChanges get_visibility_changes(
+    const cfg::ControlFlowGraph& cfg,
+    DexType* scope,
+    const DexMethod* effective_caller_resolved_from);
 
 /**
  * NOTE: Only relocates the method. Doesn't check the correctness here,
@@ -231,12 +77,25 @@ void change_visibility(DexMethod* method);
  *       new type.
  */
 void relocate_method(DexMethod* method, DexType* to_type);
+void relocate_field(DexField* field, DexType* to_type);
 
 /**
- * Relocates the method only if it doesn't require any changes to the
- * referenced methods (none of the referenced methods would need to change
- * into a virtual / static method). It also updates the visibility of
- * the accessed members.
+ * Checks if a method can be relocated, i.e. if it doesn't require any changes
+ * to invoked direct methods (none of the invoked direct methods would need to
+ * change into a public virtual / static method) or framework protected methods.
+ * Any problematic invoked methods are added to the optionally supplied set.
+ */
+bool gather_invoked_methods_that_prevent_relocation(
+    const DexMethod* method,
+    std::unordered_set<DexMethodRef*>* methods_preventing_relocation = nullptr);
+
+/**
+ * Relocates the method only if
+ * gather_invoked_methods_that_prevent_relocation returns true.
+ * It also updates the visibility of the accessed members.
+ * NOTE: Does not check if get_visibility_changes(...) is empty.
+ * TODO: Consider integrating the full visibility check in
+ * gather_invoked_methods_that_prevent_relocation.
  */
 bool relocate_method_if_no_changes(DexMethod* method, DexType* to_type);
 
@@ -270,7 +129,7 @@ bool passes_args_through(IRInstruction* insn,
  * by transformations for substituting instructions which throw an exception
  * at runtime. Currently, used for substituting switch case instructions.
  */
-void create_runtime_exception_block(DexString* except_str,
+void create_runtime_exception_block(const DexString* except_str,
                                     std::vector<IRInstruction*>& block);
 
 /**
@@ -287,7 +146,11 @@ Scope build_class_scope(const T& dexen) {
   }
   return v;
 };
-Scope build_class_scope(DexStoresVector& stores);
+Scope build_class_scope(const DexStoresVector& stores);
+
+Scope build_class_scope_for_packages(
+    const DexStoresVector& stores,
+    const std::unordered_set<std::string>& package_names);
 
 /**
  * Posts the changes made to the Scope& object to the
@@ -299,13 +162,10 @@ void post_dexen_changes(const Scope& v, T& dexen) {
   std::unordered_set<DexClass*> clookup(v.begin(), v.end());
   for (auto& classes : dexen) {
     classes.erase(
-      std::remove_if(
-        classes.begin(),
-        classes.end(),
-        [&](DexClass* cls) {
-          return !clookup.count(cls);
-        }),
-      classes.end());
+        std::remove_if(classes.begin(),
+                       classes.end(),
+                       [&](DexClass* cls) { return !clookup.count(cls); }),
+        classes.end());
   }
   if (debug) {
     std::unordered_set<DexClass*> dlookup;
@@ -321,19 +181,22 @@ void post_dexen_changes(const Scope& v, T& dexen) {
 };
 void post_dexen_changes(const Scope& v, DexStoresVector& stores);
 
-void load_root_dexen(
-  DexStore& store,
-  const std::string& dexen_dir_str,
-  bool balloon = false,
-  bool verbose = true);
+void load_root_dexen(DexStore& store,
+                     const std::string& dexen_dir_str,
+                     bool balloon = false,
+                     bool throw_on_balloon_error = true,
+                     bool verbose = true,
+                     int support_dex_version = 35);
 
-/*
- * This exists because in the absence of a register allocator, we need each
- * transformation to keep the ins registers at the end of the frame. Once the
- * register allocator is switched on this function should no longer have many
- * use cases.
+/**
+ * Creates a generated store based on the given classes.
+ *
+ * NOTE: InterDex will take care of adding the classes to the root store.
+ * TODO: Add a way to define a real store.
  */
-size_t sum_param_sizes(const IRCode*);
+void create_store(const std::string& store_name,
+                  DexStoresVector& stores,
+                  DexClasses classes);
 
 /**
  * Determine if the given dex item has the given annotation
@@ -354,44 +217,171 @@ bool has_anno(const T* t, const DexType* anno_type) {
   return false;
 }
 
-struct dex_stats_t {
-  int num_types = 0;
-  int num_classes = 0;
-  int num_methods = 0;
-  int num_method_refs = 0;
-  int num_fields = 0;
-  int num_field_refs = 0;
-  int num_strings = 0;
-  int num_protos = 0;
-  int num_static_values = 0;
-  int num_annotations = 0;
-  int num_type_lists = 0;
-  int num_bytes = 0;
-  int num_instructions = 0;
-};
+template <typename T>
+bool has_anno(const T* t, const std::unordered_set<DexType*>& anno_types) {
+  if (t->get_anno_set() == nullptr) return false;
+  for (const auto& anno : t->get_anno_set()->get_annotations()) {
+    if (anno_types.count(anno->type())) {
+      return true;
+    }
+  }
+  return false;
+}
 
-dex_stats_t&
-  operator+=(dex_stats_t& lhs, const dex_stats_t& rhs);
+// Check whether the given string is a valid identifier. This does
+// not handle UTF. Checks against the Java bytecode specification,
+// which is a bit more relaxed than Dex's.
+bool is_valid_identifier(std::string_view s);
 
-namespace JavaNameUtil {
+namespace java_names {
+
+inline const std::string* primitive_desc_to_name(char desc) {
+  const static std::unordered_map<char, std::string> conversion_table{
+      {'V', "void"},    {'B', "byte"},  {'C', "char"},
+      {'S', "short"},   {'I', "int"},   {'J', "long"},
+      {'Z', "boolean"}, {'F', "float"}, {'D', "double"},
+  };
+  auto it = conversion_table.find(desc);
+  if (it != conversion_table.end()) {
+    return &it->second;
+  } else {
+    return nullptr;
+  }
+}
+
+inline boost::optional<char> primitive_name_to_desc(std::string_view name) {
+  const static std::unordered_map<std::string_view, char> conversion_table{
+      {"void", 'V'},    {"byte", 'B'},  {"char", 'C'},
+      {"short", 'S'},   {"int", 'I'},   {"long", 'J'},
+      {"boolean", 'Z'}, {"float", 'F'}, {"double", 'D'},
+  };
+  auto it = conversion_table.find(name);
+  if (it != conversion_table.end()) {
+    return it->second;
+  } else {
+    return boost::none;
+  }
+}
 
 // Example: "Ljava/lang/String;" --> "java.lang.String"
-inline std::string internal_to_external(const std::string& internal_name) {
-  auto external_name = internal_name.substr(1, internal_name.size() - 2);
-  std::replace(external_name.begin(), external_name.end(), '/', '.');
-  return external_name;
+// Example: "[Ljava/lang/String;" --> "[Ljava.lang.String;"
+// Example: "I" --> "int"
+// Example: "[I" --> "[I"
+inline std::string internal_to_external(std::string_view internal_name) {
+  int array_level = std::count(internal_name.begin(), internal_name.end(), '[');
+
+  std::string_view component_name = internal_name.substr(array_level);
+
+  char type = component_name.at(0);
+  if (type == 'L') {
+    // For arrays, we need to preserve the semicolon at the end of the name
+    std::string external_name;
+    size_t component_name_len =
+        component_name.size() - (array_level == 0 ? 2 : 1);
+    external_name.reserve(array_level + 1 + component_name_len);
+    if (array_level != 0) {
+      external_name.append(array_level, '[');
+      external_name.append(1, 'L'); // external only uses 'L' for arrays
+    }
+    external_name.append(component_name.substr(1, component_name_len));
+    std::replace(external_name.begin(), external_name.end(), '/', '.');
+    return external_name;
+  } else if (array_level) {
+    // If the type is an array of primitives, the external format is the same
+    // as internal.
+    return std::string(internal_name);
+  } else {
+    auto maybe_external_name = primitive_desc_to_name(type);
+    always_assert_log(
+        maybe_external_name, "%c is not a valid primitive type.", type);
+    return *maybe_external_name;
+  }
 }
 
 // Example: "java.lang.String" --> "Ljava/lang/String;"
-inline std::string external_to_internal(const std::string& external_name) {
-  auto internal_name = "L" + external_name + ";";
+// Example: "[Ljava.lang.String;" --> "[Ljava/lang/String;"
+// Example: "int" --> "I"
+// Example: "[I" --> "[I"
+// Example: "I" --> "LI;"
+// Example: "[LI;" --> "[LI;"
+inline std::string external_to_internal(std::string_view external_name) {
+  // Primitive types (not including their arrays) are special notations
+  auto maybe_primitive_name = primitive_name_to_desc(external_name);
+  if (maybe_primitive_name) {
+    return std::string(1, *maybe_primitive_name);
+  }
+
+  int array_level = std::count(external_name.begin(), external_name.end(), '[');
+  auto component_external_name = external_name.substr(array_level);
+  /**
+   * Note: "I" is a perfectly valid external name denoting a class of "LI;"
+   * while "int" is the external name for int type. However, "[I" is an array of
+   * int. For an array of "I", you need to use "[LI;"
+   */
+  if (array_level != 0 && component_external_name.size() == 1) {
+    // It must be an array of primitives. The internal name is the same as the
+    // external name.
+    return std::string(external_name);
+  }
+
+  std::string internal_name;
+  internal_name.reserve(array_level + component_external_name.size() + 2);
+  if (array_level == 0) {
+    internal_name.append(1, 'L');
+  } else {
+    internal_name.append(array_level, '[');
+  }
+  internal_name.append(component_external_name);
+
   std::replace(internal_name.begin(), internal_name.end(), '.', '/');
+  if (!boost::algorithm::ends_with(internal_name, ";")) {
+    internal_name.append(1, ';');
+  }
   return internal_name;
 }
 
-inline std::string package_name(const std::string& type_name) {
+// Example: "Ljava/lang/String;" --> "String"
+// Example: "[Ljava/lang/String;" --> "String[]"
+// Example: "I" --> "int"
+// Example: "[I" --> "int[]"
+// Example: "LA$B$C;" --> "C"
+// Example: "[LA$B;" --> "B[]"
+// Example: "Ljava/lang$1;" --> ""
+// Note: kotlin anonymous class is not handled properly here.
+inline std::string internal_to_simple(std::string_view internal_name) {
+  int array_level = std::count(internal_name.begin(), internal_name.end(), '[');
+  auto component_name = internal_name.substr(array_level);
+  std::string component_external_name = internal_to_external(component_name);
+  std::size_t last_dot = component_external_name.rfind('.');
+  std::size_t last_dollar = component_external_name.rfind('$');
+  std::string component_simple_name;
+  if (last_dot == std::string::npos && last_dollar == std::string::npos) {
+    component_simple_name = component_external_name;
+  } else if (last_dot == std::string::npos) {
+    component_simple_name = component_external_name.substr(last_dollar + 1);
+  } else if (last_dollar == std::string::npos) {
+    component_simple_name = component_external_name.substr(last_dot + 1);
+  } else {
+    size_t simple_begin = (last_dot < last_dollar) ? last_dollar : last_dot;
+    component_simple_name = component_external_name.substr(simple_begin + 1);
+  }
+  if (std::all_of(component_simple_name.begin(),
+                  component_simple_name.end(),
+                  isdigit)) {
+    component_simple_name = "";
+  }
+  // append a pair of [] for each array level.
+  std::string array_suffix;
+  array_suffix.reserve(2 * array_level);
+  for (int i = 0; i < array_level; i++) {
+    array_suffix += "[]";
+  }
+  return component_simple_name + array_suffix;
+}
+
+inline std::string package_name(std::string_view type_name) {
   std::string nice_name = internal_to_external(type_name);
-  std::size_t last_dot = nice_name.rfind(".");
+  std::size_t last_dot = nice_name.rfind('.');
   if (last_dot != std::string::npos) {
     return nice_name.substr(0, last_dot);
   } else {
@@ -399,4 +389,13 @@ inline std::string package_name(const std::string& type_name) {
     return nice_name;
   }
 }
+
+inline bool is_deliminator(char ch) {
+  return isspace(ch) || ch == '{' || ch == '}' || ch == '(' || ch == ')' ||
+         ch == ',' || ch == ';' || ch == ':' || ch == '#';
 }
+
+// An identifier can refer to a class name, a field name or a package name.
+// https://docs.oracle.com/javase/specs/jls/se16/html/jls-3.html#jls-JavaLetter
+bool is_identifier(const std::string_view& ident);
+} // namespace java_names

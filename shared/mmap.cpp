@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "mmap.h"
@@ -38,12 +36,7 @@ MappedFile* MappedFile::mmap_file(size_t byte_count,
     if (error_msg != nullptr) {
 
       fprintf(stderr, "mmap(%zu, %jd, 0x%x, 0x%x, %d) of file '%s' failed\n",
-             byte_count,
-             (intmax_t)offset,
-             prot,
-             flags,
-             fd,
-             filename);
+              byte_count, (intmax_t)offset, prot, flags, fd, filename);
     }
     return nullptr;
   }
@@ -62,9 +55,7 @@ MappedFile::~MappedFile() {
   }
 }
 
-MappedFile::MappedFile(const std::string& _name,
-                       uint8_t* _begin,
-                       size_t _size)
+MappedFile::MappedFile(const std::string& _name, uint8_t* _begin, size_t _size)
     : name_(_name), begin_(_begin), size_(_size) {
   if (size_ == 0) {
     CHECK(begin_ == nullptr);

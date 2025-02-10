@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -15,6 +13,7 @@
 #include "DexClass.h"
 #include "IRInstruction.h"
 #include "Inliner.h"
+#include "InlinerConfig.h"
 #include "Resolver.h"
 
 using RegSet = boost::dynamic_bitset<>;
@@ -23,7 +22,7 @@ struct TaintedRegs {
   RegSet m_reg_set;
 
   explicit TaintedRegs(int nregs) : m_reg_set(nregs) {}
-  explicit TaintedRegs(const RegSet&& reg_set)
+  explicit TaintedRegs(RegSet&& reg_set) noexcept
       : m_reg_set(std::move(reg_set)) {}
 
   const RegSet& bits() { return m_reg_set; }
@@ -37,9 +36,9 @@ struct TaintedRegs {
 
 /**
  * Using negative numbers here, since those will be used
- * alongside registers (uint16_t).
+ * alongside registers (uint32_t).
  */
-enum FieldOrRegStatus : int {
+enum FieldOrRegStatus : int64_t {
   // Default mapping.
   DEFAULT = -1,
 
@@ -80,48 +79,56 @@ bool tainted_reg_escapes(
     bool enable_buildee_constr_change = false);
 
 void transfer_object_reach(DexType* object,
-                           uint16_t regs_size,
+                           uint32_t regs_size,
                            const IRInstruction* insn,
                            RegSet& regs);
 
 std::unique_ptr<std::unordered_map<IRInstruction*, TaintedRegs>>
-get_tainted_regs(uint16_t regs_size,
+get_tainted_regs(uint32_t regs_size,
                  const std::vector<cfg::Block*>& blocks,
                  DexType* type);
 
 class BuilderTransform {
  public:
-  BuilderTransform(const PassConfig& pc,
+  BuilderTransform(const init_classes::InitClassesWithSideEffects&
+                       init_classes_with_side_effects,
+                   const inliner::InlinerConfig& inliner_config,
                    const Scope& scope,
                    DexStoresVector& stores,
-                   bool throws_inline) {
+                   bool throws_inline)
+      : m_inliner_config(inliner_config) {
+    // Note: We copy global inline config in the class since it seems that it
+    // may be configured differently from global inliner_config.throws_inline.
+    // Maybe we can refactor this part.
     m_inliner_config.throws_inline = throws_inline;
 
-    auto resolver = [&](DexMethodRef* method, MethodSearch search) {
-      return resolve_method(method, search, m_resolved_refs);
-    };
-
     std::unordered_set<DexMethod*> no_default_inlinables;
+    int min_sdk = 0;
     m_inliner = std::unique_ptr<MultiMethodInliner>(new MultiMethodInliner(
-        scope, stores, no_default_inlinables, resolver, m_inliner_config));
+        scope, init_classes_with_side_effects, stores, no_default_inlinables,
+        std::ref(m_concurrent_method_resolver), m_inliner_config, min_sdk));
   }
 
-  bool inline_methods(DexMethod* method,
-                      DexType* type,
-                      std::function<std::vector<DexMethod*>(IRCode*, DexType*)>
-                          get_methods_to_inline);
+  bool inline_methods(
+      DexMethod* method,
+      DexType* type,
+      const std::function<std::unordered_set<DexMethod*>(IRCode*, DexType*)>&
+          get_methods_to_inline);
+
+  void flush() { m_inliner->flush(); }
 
  private:
   std::unique_ptr<MultiMethodInliner> m_inliner;
-  MultiMethodInliner::Config m_inliner_config;
-  MethodRefCache m_resolved_refs;
+  inliner::InlinerConfig m_inliner_config;
+  ConcurrentMethodResolver m_concurrent_method_resolver;
 };
 
-std::vector<DexMethod*> get_all_methods(IRCode* code, DexType* type);
+std::unordered_set<DexMethod*> get_all_methods(IRCode* code, DexType* type);
 
-std::vector<DexMethod*> get_non_init_methods(IRCode* code, DexType* type);
+std::unordered_set<DexMethod*> get_non_init_methods(IRCode* code,
+                                                    DexType* type);
 
-bool has_builder_name(DexType* cls);
+bool has_builder_name(DexType* type);
 
 /**
  * Given a builder, returns the enclosing class type.

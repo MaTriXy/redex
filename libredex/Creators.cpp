@@ -1,70 +1,78 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "Creators.h"
 
 #include <boost/range/adaptor/reversed.hpp>
 
+#include "DexPosition.h"
 #include "IROpcode.h"
+#include "RedexContext.h"
+#include "Show.h"
 #include "Transform.h"
 
 namespace {
 
 // TODO: make naming of methods smart
-DexString* get_name(DexMethod* meth) {
-  std::string name(meth->get_name()->c_str());
-  name = "__st__" + name;
-  return DexString::make_string(name.c_str());
+const DexString* get_name(DexMethod* meth) {
+  std::string name = "__st__" + meth->get_name()->str();
+  return DexString::make_string(name);
 }
 
 DexProto* make_static_sig(DexMethod* meth) {
   auto proto = meth->get_proto();
   auto rtype = proto->get_rtype();
-  std::deque<DexType*> arg_list;
+  DexTypeList::ContainerType arg_list;
   arg_list.push_back(meth->get_class());
-  auto args = proto->get_args()->get_type_list();
-  arg_list.insert(arg_list.end(), args.begin(), args.end());
+  auto* args = proto->get_args();
+  arg_list.insert(arg_list.end(), args->begin(), args->end());
   auto new_args = DexTypeList::make_type_list(std::move(arg_list));
   return DexProto::make_proto(rtype, new_args);
 }
 
 } // namespace
 
-MethodBlock::MethodBlock(IRList::iterator iterator, MethodCreator* creator)
-    : mc(creator), curr(iterator) {}
+std::string ClassCreator::show_cls(const DexClass* cls) { return show(cls); }
+std::string ClassCreator::show_type(const DexType* type) { return show(type); }
+
+DexClass* ClassCreator::create() {
+  always_assert_log(m_cls->m_self, "Self cannot be null in a DexClass");
+  if (m_cls->m_super_class == nullptr) {
+    if (m_cls->m_self != type::java_lang_Object()) {
+      always_assert_log(m_cls->m_super_class, "No supertype found for %s",
+                        show_type(m_cls->m_self).c_str());
+    }
+  }
+  m_cls->m_interfaces = DexTypeList::make_type_list(std::move(m_interfaces));
+  DexClass* cls = m_cls.release();
+  g_redex->publish_class(cls);
+  return cls;
+}
+
+MethodBlock::MethodBlock(const IRList::iterator& iterator,
+                         MethodCreator* creator)
+    : mc(creator), curr(iterator) {
+  mc->blocks.push_back(std::unique_ptr<MethodBlock>(this));
+}
 
 void MethodBlock::invoke(DexMethod* meth, const std::vector<Location>& args) {
   always_assert(meth->is_concrete());
-  IROpcode opcode;
-  if (meth->is_virtual()) {
-    if (is_interface(type_class(meth->get_class()))) {
-      opcode = OPCODE_INVOKE_INTERFACE;
-    } else {
-      opcode = OPCODE_INVOKE_VIRTUAL;
-    }
-  } else {
-    if (is_static(meth)) {
-      opcode = OPCODE_INVOKE_STATIC;
-    } else {
-      opcode = OPCODE_INVOKE_DIRECT;
-    }
-  }
+  IROpcode opcode = opcode::invoke_for_method(meth);
+
   invoke(opcode, meth, args);
 }
 
 void MethodBlock::invoke(IROpcode opcode,
                          DexMethodRef* meth,
                          const std::vector<Location>& args) {
-  always_assert(is_invoke(opcode));
+  always_assert(opcode::is_an_invoke(opcode));
   auto invk = new IRInstruction(opcode);
   uint16_t arg_count = static_cast<uint16_t>(args.size());
-  invk->set_method(meth)->set_arg_word_count(arg_count);
+  invk->set_method(meth)->set_srcs_size(arg_count);
   for (uint16_t i = 0; i < arg_count; i++) {
     auto arg = args.at(i);
     invk->set_src(i, arg.get_reg());
@@ -80,6 +88,18 @@ void MethodBlock::new_instance(DexType* type, Location& dst) {
                        ->set_dest(dst.get_reg()));
 }
 
+void MethodBlock::new_array(DexType* type,
+                            const Location& size,
+                            const Location& dst) {
+  auto insn = new IRInstruction(OPCODE_NEW_ARRAY);
+  insn->set_type(type);
+  insn->set_srcs_size(1);
+  insn->set_src(0, size.get_reg());
+  push_instruction(insn);
+  push_instruction((new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))
+                       ->set_dest(dst.get_reg()));
+}
+
 void MethodBlock::throwex(Location ex) {
   auto insn = new IRInstruction(OPCODE_THROW);
   insn->set_src(0, ex.get_reg());
@@ -89,7 +109,7 @@ void MethodBlock::throwex(Location ex) {
 void MethodBlock::iget(DexField* field, Location obj, Location& dst) {
   always_assert(field->is_concrete() && !is_static(field));
   IROpcode opcode;
-  char t = type_shorty(field->get_type());
+  char t = type::type_shorty(field->get_type());
   switch (t) {
   case 'Z':
     opcode = OPCODE_IGET_BOOLEAN;
@@ -116,8 +136,7 @@ void MethodBlock::iget(DexField* field, Location obj, Location& dst) {
     opcode = OPCODE_IGET_OBJECT;
     break;
   default:
-    always_assert(false);
-    break;
+    not_reached();
   }
   ifield_op(opcode, field, obj, dst);
 }
@@ -125,7 +144,7 @@ void MethodBlock::iget(DexField* field, Location obj, Location& dst) {
 void MethodBlock::iput(DexField* field, Location obj, Location src) {
   always_assert(field->is_concrete() && !is_static(field));
   IROpcode opcode;
-  char t = type_shorty(field->get_type());
+  char t = type::type_shorty(field->get_type());
   switch (t) {
   case 'Z':
     opcode = OPCODE_IPUT_BOOLEAN;
@@ -152,8 +171,7 @@ void MethodBlock::iput(DexField* field, Location obj, Location src) {
     opcode = OPCODE_IPUT_OBJECT;
     break;
   default:
-    always_assert(false);
-    break;
+    not_reached();
   }
   ifield_op(opcode, field, obj, src);
 }
@@ -162,11 +180,11 @@ void MethodBlock::ifield_op(IROpcode opcode,
                             DexField* field,
                             Location obj,
                             Location& src_or_dst) {
-  always_assert(is_ifield_op(opcode));
-  if (is_iget(opcode)) {
+  always_assert(opcode::is_an_ifield_op(opcode));
+  if (opcode::is_an_iget(opcode)) {
     auto iget = new IRInstruction(opcode);
     iget->set_field(field);
-    src_or_dst.type = field->get_class();
+    src_or_dst.type = field->get_type();
     iget->set_src(0, obj.get_reg());
     push_instruction(iget);
     push_instruction(
@@ -184,7 +202,7 @@ void MethodBlock::ifield_op(IROpcode opcode,
 void MethodBlock::sget(DexField* field, Location& dst) {
   always_assert(field->is_concrete() && is_static(field));
   IROpcode opcode;
-  char t = type_shorty(field->get_type());
+  char t = type::type_shorty(field->get_type());
   switch (t) {
   case 'Z':
     opcode = OPCODE_SGET_BOOLEAN;
@@ -211,8 +229,7 @@ void MethodBlock::sget(DexField* field, Location& dst) {
     opcode = OPCODE_SGET_OBJECT;
     break;
   default:
-    always_assert(false);
-    break;
+    not_reached();
   }
   sfield_op(opcode, field, dst);
 }
@@ -220,7 +237,7 @@ void MethodBlock::sget(DexField* field, Location& dst) {
 void MethodBlock::sput(DexField* field, Location src) {
   always_assert(field->is_concrete() && is_static(field));
   IROpcode opcode;
-  char t = type_shorty(field->get_type());
+  char t = type::type_shorty(field->get_type());
   switch (t) {
   case 'Z':
     opcode = OPCODE_SPUT_BOOLEAN;
@@ -247,8 +264,7 @@ void MethodBlock::sput(DexField* field, Location src) {
     opcode = OPCODE_SPUT_OBJECT;
     break;
   default:
-    always_assert(false);
-    break;
+    not_reached();
   }
   sfield_op(opcode, field, src);
 }
@@ -256,11 +272,11 @@ void MethodBlock::sput(DexField* field, Location src) {
 void MethodBlock::sfield_op(IROpcode opcode,
                             DexField* field,
                             Location& src_or_dst) {
-  always_assert(is_sfield_op(opcode));
-  if (is_sget(opcode)) {
+  always_assert(opcode::is_an_sfield_op(opcode));
+  if (opcode::is_an_sget(opcode)) {
     auto sget = new IRInstruction(opcode);
     sget->set_field(field);
-    src_or_dst.type = field->get_class();
+    src_or_dst.type = field->get_type();
     push_instruction(sget);
     push_instruction(
         (new IRInstruction(opcode::move_result_pseudo_for_sget(opcode)))
@@ -274,8 +290,8 @@ void MethodBlock::sfield_op(IROpcode opcode,
 
 void MethodBlock::move(Location src, Location& dst) {
   always_assert(src.is_compatible(dst.type));
-  auto ch = type_shorty(dst.type);
-  assert(ch != 'V');
+  auto ch = type::type_shorty(dst.type);
+  redex_assert(ch != 'V');
   IROpcode opcode;
   if (ch == 'L')
     opcode = OPCODE_MOVE_OBJECT;
@@ -292,8 +308,8 @@ void MethodBlock::move(Location src, Location& dst) {
 
 void MethodBlock::move_result(Location& dst, DexType* type) {
   always_assert(dst.is_compatible(type));
-  auto ch = type_shorty(type);
-  assert(ch != 'V');
+  auto ch = type::type_shorty(type);
+  redex_assert(ch != 'V');
   IROpcode opcode;
   if (ch == 'L')
     opcode = OPCODE_MOVE_RESULT_OBJECT;
@@ -319,7 +335,7 @@ void MethodBlock::check_cast(Location& src_and_dst, DexType* type) {
 
 void MethodBlock::instance_of(Location& obj, Location& dst, DexType* type) {
   always_assert(obj.is_ref());
-  always_assert(dst.type == get_boolean_type());
+  always_assert(dst.type == type::_boolean());
   IRInstruction* insn = new IRInstruction(OPCODE_INSTANCE_OF);
   insn->set_src(0, obj.get_reg());
   insn->set_type(type);
@@ -329,8 +345,8 @@ void MethodBlock::instance_of(Location& obj, Location& dst, DexType* type) {
 }
 
 void MethodBlock::ret(Location loc) {
-  auto ch = type_shorty(loc.type);
-  assert(ch != 'V');
+  auto ch = type::type_shorty(loc.type);
+  redex_assert(ch != 'V');
   IROpcode opcode;
   if (ch == 'L')
     opcode = OPCODE_RETURN_OBJECT;
@@ -344,10 +360,12 @@ void MethodBlock::ret(Location loc) {
   push_instruction(ret);
 }
 
-void MethodBlock::ret_void() { push_instruction(new IRInstruction(OPCODE_RETURN_VOID)); }
+void MethodBlock::ret_void() {
+  push_instruction(new IRInstruction(OPCODE_RETURN_VOID));
+}
 
 void MethodBlock::ret(DexType* rtype, Location loc) {
-  if (rtype != get_void_type()) {
+  if (rtype != type::_void()) {
     ret(loc);
   } else {
     ret_void();
@@ -359,7 +377,17 @@ void MethodBlock::load_const(Location& loc, int32_t value) {
   IRInstruction* load = new IRInstruction(OPCODE_CONST);
   load->set_dest(loc.get_reg());
   load->set_literal(value);
-  loc.type = get_int_type();
+  loc.type = type::_int();
+  push_instruction(load);
+}
+
+void MethodBlock::load_const(Location& loc, int64_t value, DexType* type) {
+  always_assert(type::is_wide_type(type) == loc.is_wide());
+  IRInstruction* load =
+      new IRInstruction(loc.is_wide() ? OPCODE_CONST_WIDE : OPCODE_CONST);
+  load->set_dest(loc.get_reg());
+  load->set_literal(value);
+  loc.type = type;
   push_instruction(load);
 }
 
@@ -368,18 +396,18 @@ void MethodBlock::load_const(Location& loc, double value) {
   IRInstruction* load = new IRInstruction(OPCODE_CONST_WIDE);
   load->set_dest(loc.get_reg());
   load->set_literal(value);
-  loc.type = get_double_type();
+  loc.type = type::_double();
   push_instruction(load);
 }
 
-void MethodBlock::load_const(Location& loc, DexString* value) {
+void MethodBlock::load_const(Location& loc, const DexString* value) {
   always_assert(!loc.is_wide());
   IRInstruction* load = new IRInstruction(OPCODE_CONST_STRING);
   load->set_string(value);
   push_instruction(load);
   IRInstruction* move_result_pseudo =
       new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT);
-  loc.type = get_string_type();
+  loc.type = type::java_lang_String();
   move_result_pseudo->set_dest(loc.get_reg());
   push_instruction(move_result_pseudo);
 }
@@ -391,7 +419,7 @@ void MethodBlock::load_const(Location& loc, DexType* value) {
   push_instruction(load);
   IRInstruction* move_result_pseudo =
       new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT);
-  loc.type = get_class_type();
+  loc.type = type::java_lang_Class();
   move_result_pseudo->set_dest(loc.get_reg());
   push_instruction(move_result_pseudo);
 }
@@ -401,7 +429,7 @@ void MethodBlock::load_null(Location& loc) {
   IRInstruction* load = new IRInstruction(OPCODE_CONST);
   load->set_dest(loc.get_reg());
   load->set_literal(0);
-  loc.type = get_object_type();
+  loc.type = type::java_lang_Object();
   push_instruction(load);
 }
 
@@ -415,27 +443,27 @@ void MethodBlock::init_loc(Location& loc) {
   }
 }
 
-void MethodBlock::binop_lit16(IROpcode op,
-                              const Location& dest,
-                              const Location& src,
-                              int16_t literal) {
-  always_assert(OPCODE_ADD_INT_LIT16 <= op && op <= OPCODE_XOR_INT_LIT16);
-  always_assert(dest.type == src.type);
-  always_assert(dest.type == get_int_type());
+void MethodBlock::binop(IROpcode op,
+                        const Location& dest,
+                        const Location& src0,
+                        const Location& src1) {
+  always_assert(OPCODE_ADD_INT <= op && op <= OPCODE_REM_DOUBLE);
+  always_assert(dest.type == src0.type);
+  always_assert(dest.type == src1.type);
   IRInstruction* insn = new IRInstruction(op);
   insn->set_dest(dest.get_reg());
-  insn->set_src(0, src.get_reg());
-  insn->set_literal(literal);
+  insn->set_src(0, src0.get_reg());
+  insn->set_src(1, src1.get_reg());
   push_instruction(insn);
 }
 
-void MethodBlock::binop_lit8(IROpcode op,
-                             const Location& dest,
-                             const Location& src,
-                             int8_t literal) {
-  always_assert(OPCODE_ADD_INT_LIT8 <= op && op <= OPCODE_USHR_INT_LIT8);
+void MethodBlock::binop_lit(IROpcode op,
+                            const Location& dest,
+                            const Location& src,
+                            int16_t literal) {
+  always_assert(OPCODE_ADD_INT_LIT <= op && op <= OPCODE_USHR_INT_LIT);
   always_assert(dest.type == src.type);
-  always_assert(dest.type == get_int_type());
+  always_assert(dest.type == type::_int());
   IRInstruction* insn = new IRInstruction(op);
   insn->set_dest(dest.get_reg());
   insn->set_src(0, src.get_reg());
@@ -482,7 +510,7 @@ MethodBlock* MethodBlock::if_else_testz(IROpcode if_op,
 
 MethodBlock* MethodBlock::switch_op(Location test,
                                     std::map<int, MethodBlock*>& cases) {
-  auto sw_opcode = new IRInstruction(OPCODE_PACKED_SWITCH);
+  auto sw_opcode = new IRInstruction(OPCODE_SWITCH);
   sw_opcode->set_src(0, test.get_reg());
   // Convert to SwitchIndices map.
   std::map<SwitchIndices, MethodBlock*> indices_cases;
@@ -492,9 +520,9 @@ MethodBlock* MethodBlock::switch_op(Location test,
   }
   auto mb = make_switch_block(sw_opcode, indices_cases);
   // Copy initialized case blocks back.
-  for (auto it : indices_cases) {
+  for (const auto& it : indices_cases) {
     SwitchIndices indices = it.first;
-    always_assert(indices.size());
+    always_assert(!indices.empty());
     int idx = *indices.begin();
     cases[idx] = it.second;
   }
@@ -503,14 +531,13 @@ MethodBlock* MethodBlock::switch_op(Location test,
 
 MethodBlock* MethodBlock::switch_op(
     Location test, std::map<SwitchIndices, MethodBlock*>& cases) {
-  auto sw_opcode = new IRInstruction(OPCODE_PACKED_SWITCH);
+  auto sw_opcode = new IRInstruction(OPCODE_SWITCH);
   sw_opcode->set_src(0, test.get_reg());
   return make_switch_block(sw_opcode, cases);
 }
 
 void MethodCreator::load_locals(DexMethod* meth) {
-  auto ii = InstructionIterable(
-      meth->get_code()->get_param_instructions());
+  auto ii = InstructionIterable(meth->get_code()->get_param_instructions());
   auto it = ii.begin();
   if (!is_static(meth)) {
     make_local_at(meth->get_class(), it->insn->dest());
@@ -519,7 +546,7 @@ void MethodCreator::load_locals(DexMethod* meth) {
   auto proto = meth->get_proto();
   auto args = proto->get_args();
   if (args) {
-    for (auto arg : args->get_type_list()) {
+    for (auto arg : *args) {
       make_local_at(arg, it->insn->dest());
       ++it;
     }
@@ -531,7 +558,15 @@ void MethodBlock::push_instruction(IRInstruction* insn) {
   curr = mc->push_instruction(curr, insn);
 }
 
-IRList::iterator MethodCreator::push_instruction(IRList::iterator curr,
+void MethodBlock::push_position(std::unique_ptr<DexPosition> pos) {
+  curr = mc->push_position(curr, std::move(pos));
+}
+
+void MethodBlock::push_source_block(std::unique_ptr<SourceBlock> sb) {
+  curr = mc->push_source_block(curr, std::move(sb));
+}
+
+IRList::iterator MethodCreator::push_instruction(const IRList::iterator& curr,
                                                  IRInstruction* insn) {
   if (curr == meth_code->end()) {
     meth_code->push_back(insn);
@@ -541,16 +576,35 @@ IRList::iterator MethodCreator::push_instruction(IRList::iterator curr,
   }
 }
 
+IRList::iterator MethodCreator::push_position(
+    const IRList::iterator& curr, std::unique_ptr<DexPosition> pos) {
+  if (curr == meth_code->end()) {
+    meth_code->push_back(std::move(pos));
+    return std::prev(meth_code->end());
+  } else {
+    return meth_code->insert_after(curr, std::move(pos));
+  }
+}
+
+IRList::iterator MethodCreator::push_source_block(
+    const IRList::iterator& curr, std::unique_ptr<SourceBlock> sb) {
+  if (curr == meth_code->end()) {
+    meth_code->push_back(std::move(sb));
+    return std::prev(meth_code->end());
+  } else {
+    return meth_code->insert_after(curr, std::move(sb));
+  }
+}
+
 MethodBlock* MethodBlock::make_if_block(IRInstruction* insn) {
   IRList::iterator false_block;
   curr = mc->make_if_block(curr, insn, &false_block);
   return new MethodBlock(false_block, mc);
 }
 
-IRList::iterator MethodCreator::make_if_block(
-    IRList::iterator curr,
-    IRInstruction* insn,
-    IRList::iterator* false_block) {
+IRList::iterator MethodCreator::make_if_block(IRList::iterator curr,
+                                              IRInstruction* insn,
+                                              IRList::iterator* false_block) {
   return meth_code->make_if_block(++curr, insn, false_block);
 }
 
@@ -575,7 +629,7 @@ MethodBlock* MethodBlock::make_switch_block(
     IRInstruction* insn, std::map<SwitchIndices, MethodBlock*>& cases) {
   IRList::iterator default_it;
   std::map<SwitchIndices, IRList::iterator> mt_cases;
-  for (auto cases_it : cases) {
+  for (const auto& cases_it : cases) {
     mt_cases[cases_it.first] = curr;
   }
   curr = mc->make_switch_block(curr, insn, &default_it, mt_cases);
@@ -593,30 +647,56 @@ IRList::iterator MethodCreator::make_switch_block(
   return meth_code->make_switch_block(++curr, insn, default_block, cases);
 }
 
+std::vector<Location> MethodCreator::get_reg_args() {
+  std::vector<Location> args;
+  uint32_t args_size = method->get_proto()->get_args()->size();
+  if (!is_static(method)) {
+    args_size += 1;
+  }
+  args.insert(args.end(), locals.begin(), locals.begin() + args_size);
+  return args;
+}
+
 MethodCreator::MethodCreator(DexMethod* meth)
-    : method(meth)
-    , meth_code(meth->get_code()) {
+    : method(meth), meth_code(meth->get_code()) {
   always_assert_log(meth->is_concrete(),
-      "Method must be concrete or use the other ctor");
+                    "Method must be concrete or use the other ctor");
   load_locals(meth);
   main_block = new MethodBlock(meth_code->main_block(), this);
 }
 
+MethodCreator::MethodCreator(DexMethodRef* ref,
+                             DexAccessFlags access,
+                             std::unique_ptr<DexAnnotationSet> anno,
+                             bool with_debug_item)
+    : MethodCreator(ref->get_class(),
+                    ref->get_name(),
+                    ref->get_proto(),
+                    access,
+                    std::move(anno),
+                    with_debug_item){};
+
 MethodCreator::MethodCreator(DexType* cls,
-                             DexString* name,
+                             const DexString* name,
                              DexProto* proto,
                              DexAccessFlags access,
-                             DexAnnotationSet* anno)
-    : method(
-          static_cast<DexMethod*>(DexMethod::make_method(cls, name, proto))) {
+                             std::unique_ptr<DexAnnotationSet> anno,
+                             bool with_debug_item)
+    : method(static_cast<DexMethod*>(DexMethod::make_method(cls, name, proto))),
+      m_with_debug_item(with_debug_item) {
   always_assert_log(!method->is_concrete(), "Method already defined");
   if (anno) {
-    method->attach_annotation_set(anno);
+    auto res = method->attach_annotation_set(std::move(anno));
+    always_assert(res);
   }
   method->make_concrete(
       access, !(access & (ACC_STATIC | ACC_PRIVATE | ACC_CONSTRUCTOR)));
+  method->set_deobfuscated_name(show_deobfuscated(method));
   method->set_code(std::make_unique<IRCode>(method, 0));
   meth_code = method->get_code();
+  if (with_debug_item) {
+    meth_code->set_debug_item(std::make_unique<DexDebugItem>());
+  }
   load_locals(method);
   main_block = new MethodBlock(meth_code->main_block(), this);
 }
@@ -635,7 +715,7 @@ DexMethod* MethodCreator::create() {
     }
   }
   // now allocate the rest at the start
-  size_t temp_reg {0};
+  size_t temp_reg{0};
   for (size_t i = 0; i < meth_code->get_registers_size(); ++i) {
     if (reg_map.find(i) != reg_map.end()) {
       continue;
@@ -644,6 +724,16 @@ DexMethod* MethodCreator::create() {
   }
   always_assert(temp_reg == param_reg);
   transform::remap_registers(meth_code, reg_map);
+
+  if (m_with_debug_item) {
+    // Insert a fake position entry for redex generated method when we
+    // add debug item.
+    auto main_block_it = meth_code->get_param_instructions().end();
+    auto position = std::make_unique<DexPosition>(
+        DexString::make_string("RedexGenerated"), 0);
+    position->bind(DexString::make_string(show(method)));
+    meth_code->insert_before(main_block_it, std::move(position));
+  }
   return method;
 }
 
@@ -653,23 +743,23 @@ DexMethod* MethodCreator::make_static_from(DexMethod* meth,
   return make_static_from(name, meth, target_cls);
 }
 
-DexMethod* MethodCreator::make_static_from(DexString* name,
+DexMethod* MethodCreator::make_static_from(const DexString* name,
                                            DexMethod* meth,
                                            DexClass* target_cls) {
   auto proto = make_static_sig(meth);
   return make_static_from(name, proto, meth, target_cls);
 }
 
-DexMethod* MethodCreator::make_static_from(DexString* name,
+DexMethod* MethodCreator::make_static_from(const DexString* name,
                                            DexProto* proto,
                                            DexMethod* meth,
                                            DexClass* target_cls) {
-  assert(!is_static(meth));
-  assert(!is_init(meth) && !is_clinit(meth));
+  redex_assert(!is_static(meth));
+  redex_assert(!method::is_init(meth) && !method::is_clinit(meth));
   auto smeth = static_cast<DexMethod*>(
       DexMethod::make_method(target_cls->get_type(), name, proto));
-  smeth->make_concrete(
-      meth->get_access() | ACC_STATIC, meth->release_code(), false);
+  smeth->make_concrete(meth->get_access() | ACC_STATIC, meth->release_code(),
+                       false);
   target_cls->add_method(smeth);
   return smeth;
 }

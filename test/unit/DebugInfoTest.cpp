@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <gtest/gtest.h>
@@ -12,13 +10,13 @@
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "InstructionLowering.h"
+#include "RedexTest.h"
 
-TEST(DexPositionTest, multiplePositionBeforeOpcode) {
-  g_redex = new RedexContext();
+class DexPositionTest : public RedexTest {};
 
-  auto method =
-      static_cast<DexMethod*>(DexMethod::make_method("LFoo;.bar:()V"));
-  method->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+TEST_F(DexPositionTest, multiplePositionBeforeOpcode) {
+  auto method = DexMethod::make_method("LFoo;.bar:()V")
+                    ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
 
   auto code = assembler::ircode_from_string(R"(
     (
@@ -43,18 +41,12 @@ TEST(DexPositionTest, multiplePositionBeforeOpcode) {
     )
   )");
 
-  EXPECT_EQ(assembler::to_s_expr(method->get_code()),
-            assembler::to_s_expr(expected_code.get()));
-
-  delete g_redex;
+  EXPECT_CODE_EQ(method->get_code(), expected_code.get());
 }
 
-TEST(DexPositionTest, consecutiveIdenticalPositions) {
-  g_redex = new RedexContext();
-
-  auto method =
-      static_cast<DexMethod*>(DexMethod::make_method("LFoo;.bar:()V"));
-  method->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+TEST_F(DexPositionTest, consecutiveIdenticalPositions) {
+  auto method = DexMethod::make_method("LFoo;.bar:()V")
+                    ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
 
   auto code = assembler::ircode_from_string(R"(
     (
@@ -81,8 +73,5 @@ TEST(DexPositionTest, consecutiveIdenticalPositions) {
     )
   )");
 
-  EXPECT_EQ(assembler::to_s_expr(method->get_code()),
-            assembler::to_s_expr(expected_code.get()));
-
-  delete g_redex;
+  EXPECT_CODE_EQ(method->get_code(), expected_code.get());
 }

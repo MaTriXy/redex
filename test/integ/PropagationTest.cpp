@@ -1,26 +1,22 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
-
 
 #include <gtest/gtest.h>
 
-
 #include "DexClass.h"
 #include "DexInstruction.h"
-#include "DexLoader.h"
 #include "DexUtil.h"
 #include "IRCode.h"
-#include "PassManager.h"
-#include "RedexContext.h"
+#include "RedexTest.h"
+#include "Show.h"
+#include "Trace.h"
 
+#include "LocalDcePass.h"
 #include "Peephole.h"
-#include "LocalDce.h"
 
 /*
 
@@ -49,52 +45,36 @@ instructions in the optimized method.
 
 */
 
-TEST(PropagationTest1, localDCE1) {
-  g_redex = new RedexContext();
+class PropagationTest1 : public RedexIntegrationTest {};
 
-  const char* dexfile = std::getenv("dexfile");
-  ASSERT_NE(nullptr, dexfile);
+TEST_F(PropagationTest1, localDCE1) {
+  std::cout << "Loaded classes: " << classes->size() << std::endl;
 
-  std::vector<DexStore> stores;
-  DexMetadata dm;
-  dm.set_id("classes");
-  DexStore root_store(dm);
-  root_store.add_classes(load_classes_from_dex(dexfile));
-  DexClasses& classes = root_store.get_dexen().back();
-  stores.emplace_back(std::move(root_store));
-  std::cout << "Loaded classes: " << classes.size() << std::endl ;
-
-  TRACE(DCE, 2, "Code before:\n");
-  for(const auto& cls : classes) {
-    TRACE(DCE, 2, "Class %s\n", SHOW(cls));
+  TRACE(DCE, 2, "Code before:");
+  for (const auto& cls : *classes) {
+    TRACE(DCE, 2, "Class %s", SHOW(cls));
     for (const auto& dm : cls->get_dmethods()) {
-      TRACE(DCE, 2, "dmethod: %s\n",  dm->get_name()->c_str());
+      TRACE(DCE, 2, "dmethod: %s", dm->get_name()->c_str());
       if (strcmp(dm->get_name()->c_str(), "propagate") == 0) {
-        TRACE(DCE, 2, "dmethod: %s\n",  SHOW(dm->get_code()));
+        TRACE(DCE, 2, "dmethod: %s", SHOW(dm->get_code()));
       }
     }
   }
 
   std::vector<Pass*> passes = {
-    new PeepholePass(),
-    new LocalDcePass(),
+      new PeepholePass(),
+      new LocalDcePass(),
   };
 
-  PassManager manager(passes);
-  Scope external_classes;
-  manager.set_testing_mode();
+  run_passes(passes);
 
-  Json::Value conf_obj = Json::nullValue;
-  ConfigFiles dummy_cfg(conf_obj);
-  manager.run_passes(stores, external_classes, dummy_cfg);
-
-  TRACE(DCE, 2, "Code after:\n");
-  for(const auto& cls : classes) {
-    TRACE(DCE, 2, "Class %s\n", SHOW(cls));
+  TRACE(DCE, 2, "Code after:");
+  for (const auto& cls : *classes) {
+    TRACE(DCE, 2, "Class %s", SHOW(cls));
     for (const auto& dm : cls->get_dmethods()) {
-      TRACE(DCE, 2, "dmethod: %s\n",  dm->get_name()->c_str());
+      TRACE(DCE, 2, "dmethod: %s", dm->get_name()->c_str());
       if (strcmp(dm->get_name()->c_str(), "propagate") == 0) {
-        TRACE(DCE, 2, "dmethod: %s\n",  SHOW(dm->get_code()));
+        TRACE(DCE, 2, "dmethod: %s", SHOW(dm->get_code()));
         for (auto& mie : InstructionIterable(dm->get_code())) {
           auto instruction = mie.insn;
           // Make sure there is no invoke-virtual in the optimized method.
@@ -105,5 +85,4 @@ TEST(PropagationTest1, localDCE1) {
       }
     }
   }
-
 }

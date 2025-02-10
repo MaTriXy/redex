@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -13,6 +11,8 @@
 #include "ConstantPropagationAnalysis.h"
 #include "ConstantPropagationWholeProgramState.h"
 #include "DexClass.h"
+
+struct ProguardMap;
 
 namespace constant_propagation {
 
@@ -28,20 +28,24 @@ class RuntimeAssertTransform {
     DexMethodRef* field_assert_fail_handler{nullptr};
     DexMethodRef* return_value_assert_fail_handler{nullptr};
     Config() = default;
-    Config(const ProguardMap&);
+    explicit Config(const ProguardMap&);
   };
 
-  RuntimeAssertTransform(const Config& config) : m_config(config) {}
+  explicit RuntimeAssertTransform(const Config& config) : m_config(config) {}
 
   void apply(const intraprocedural::FixpointIterator&,
              const WholeProgramState&,
              DexMethod*);
 
  private:
-  ir_list::InstructionIterator insert_field_assert(
-      const WholeProgramState&, IRCode*, ir_list::InstructionIterator);
-  ir_list::InstructionIterator insert_return_value_assert(
-      const WholeProgramState&, IRCode*, ir_list::InstructionIterator);
+  // \returns true if any insn is inserted.
+  bool insert_field_assert(const WholeProgramState&,
+                           cfg::ControlFlowGraph&,
+                           cfg::InstructionIterator&);
+  // \returns true if any insns is instered.
+  bool insert_return_value_assert(const WholeProgramState&,
+                                  cfg::ControlFlowGraph&,
+                                  cfg::InstructionIterator&);
 
   void insert_param_asserts(const ConstantEnvironment&, DexMethod* method);
 

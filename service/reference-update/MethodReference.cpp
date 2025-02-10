@@ -1,20 +1,41 @@
-/**
- * Copyright (c) 2018-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "MethodReference.h"
 
+#include "ControlFlow.h"
+#include "IRList.h"
 #include "Resolver.h"
+#include "Show.h"
+#include "Trace.h"
 #include "Walkers.h"
+
+namespace {
+Scope build_class_scope_excluding_primary_dex(const DexStoresVector& stores) {
+  Scope result;
+  for (const auto& store : stores) {
+    const auto& dexen = store.get_dexen();
+    auto it = dexen.begin();
+    if (store.is_root_store()) {
+      it++;
+    }
+    for (; it != dexen.end(); it++) {
+      for (auto& clazz : *it) {
+        result.push_back(clazz);
+      }
+    }
+  }
+  return result;
+}
+} // namespace
 
 namespace method_reference {
 
-IRInstruction* make_load_const(uint16_t dest, size_t val) {
+IRInstruction* make_load_const(reg_t dest, size_t val) {
   auto load = new IRInstruction(OPCODE_CONST);
   load->set_dest(dest);
   load->set_literal(static_cast<int32_t>(val));
@@ -23,132 +44,266 @@ IRInstruction* make_load_const(uint16_t dest, size_t val) {
 
 IRInstruction* make_invoke(DexMethod* callee,
                            IROpcode opcode,
-                           std::vector<uint16_t> args) {
+                           const std::vector<reg_t>& args) {
   always_assert(callee->is_def() && is_public(callee));
-  auto invoke = (new IRInstruction(opcode))->set_method(callee);
-  invoke->set_arg_word_count(args.size());
-  for (size_t i = 0; i < args.size(); i++) {
-    invoke->set_src(i, args.at(i));
-  }
+  auto invoke = (new IRInstruction(opcode))->set_method(callee)->set_srcs(args);
   return invoke;
 }
 
-void patch_callsite(const CallSiteSpec& spec,
-                    const boost::optional<uint32_t>& additional_arg) {
-  const auto caller = spec.caller;
-  const auto call_insn = spec.call_insn;
-  const auto callee = spec.new_callee;
-  TRACE(REFU, 9, " patching call site at %s\n", SHOW(call_insn));
-
-  // Update package protected or protected methods to public.
-  if (is_static(callee) || is_any_init(callee) || !is_private(callee)) {
-    set_public(callee);
+void patch_callsite(const CallSite& callsite, const NewCallee& new_callee) {
+  if (is_static(new_callee.method) || method::is_any_init(new_callee.method) ||
+      new_callee.method->is_virtual()) {
+    set_public(new_callee.method);
   }
-  always_assert_log(
-      is_public(callee) || callee->get_class() == caller->get_class(),
-      "Updating a call site of %s when not accessible from %s\n",
-      SHOW(callee), SHOW(caller));
+  always_assert_log(is_public(new_callee.method) ||
+                        new_callee.method->get_class() ==
+                            callsite.caller->get_class(),
+                    "\tUpdating a callsite of %s when not accessible from %s\n",
+                    SHOW(new_callee.method), SHOW(callsite.caller));
 
-  auto code = caller->get_code();
-  auto additional_arg_reg = code->allocate_temp();
-  auto load_additional_arg =
-      make_load_const(additional_arg_reg, additional_arg.get_value_or(0));
-
-  // Assuming the following move-result is there and good.
-  std::vector<uint16_t> args;
-  for (size_t i = 0; i < call_insn->srcs_size(); i++) {
-    args.push_back(call_insn->src(i));
-  }
-  if (additional_arg != boost::none) {
-    args.push_back(additional_arg_reg);
-  }
-  auto invoke = make_invoke(callee, call_insn->opcode(), args);
-  if (additional_arg != boost::none) {
-    code->insert_after(
-        call_insn, std::vector<IRInstruction*>{load_additional_arg, invoke});
+  auto code = callsite.caller->get_code();
+  if (code->editable_cfg_built()) {
+    auto& cfg = code->cfg();
+    auto* insn = callsite.insn;
+    auto iterator = cfg.find_insn(insn);
+    if (new_callee.additional_args != boost::none) {
+      const auto& args = new_callee.additional_args.get();
+      auto old_size = insn->srcs_size();
+      insn->set_srcs_size(old_size + args.size());
+      size_t pos = old_size;
+      for (uint32_t arg : args) {
+        auto reg = cfg.allocate_temp();
+        // Seems it is different from dasm(OPCODE_CONST, {{VREG, reg}, {LITERAL,
+        // arg}}) which will cause instruction_lowering crash. Why?
+        auto load_const = make_load_const(reg, arg);
+        cfg.insert_before(iterator, load_const);
+        insn->set_src(pos++, reg);
+      }
+    }
+    insn->set_method(new_callee.method);
   } else {
-    code->insert_after(call_insn, std::vector<IRInstruction*>{invoke});
+    auto iterator = code->iterator_to(*callsite.mie);
+    auto insn = callsite.mie->insn;
+    if (new_callee.additional_args != boost::none) {
+      const auto& args = new_callee.additional_args.get();
+      auto old_size = insn->srcs_size();
+      insn->set_srcs_size(old_size + args.size());
+      size_t pos = old_size;
+      for (uint32_t arg : args) {
+        auto reg = code->allocate_temp();
+        // Seems it is different from dasm(OPCODE_CONST, {{VREG, reg}, {LITERAL,
+        // arg}}) which will cause instruction_lowering crash. Why?
+        auto load_const = make_load_const(reg, arg);
+        code->insert_before(iterator, load_const);
+        insn->set_src(pos++, reg);
+      }
+    }
+    insn->set_method(new_callee.method);
   }
-
-  // remove original call.
-  code->remove_opcode(call_insn);
-  TRACE(REFU, 9, " patched call site in %s\n%s\n", SHOW(caller), SHOW(code));
+  // Assuming the following move-result is there and good.
 }
 
 void update_call_refs_simple(
     const Scope& scope,
     const std::unordered_map<DexMethod*, DexMethod*>& old_to_new_callee) {
+  if (old_to_new_callee.empty()) {
+    return;
+  }
+
   auto patcher = [&](DexMethod* meth, IRCode& code) {
-    for (auto& mie : InstructionIterable(code)) {
-      auto insn = mie.insn;
-      if (!insn->has_method()) {
-        continue;
+    if (code.editable_cfg_built()) {
+      auto& cfg = code.cfg();
+      for (auto& mie : cfg::InstructionIterable(cfg)) {
+        auto* insn = mie.insn;
+        if (!insn->has_method()) {
+          continue;
+        }
+        const auto method =
+            resolve_method(insn->get_method(), opcode_to_search(insn), meth);
+        if (method == nullptr || old_to_new_callee.count(method) == 0) {
+          continue;
+        }
+        auto new_callee = old_to_new_callee.at(method);
+        // At this point, a non static private should not exist.
+        always_assert_log(!is_private(new_callee) || is_static(new_callee),
+                          "%s\n",
+                          vshow(new_callee).c_str());
+        TRACE(REFU, 9, " Updated call %s to %s", SHOW(insn), SHOW(new_callee));
+        insn->set_method(new_callee);
+        if (new_callee->is_virtual()) {
+          always_assert_log(opcode::is_invoke_virtual(insn->opcode()),
+                            "invalid callsite %s\n",
+                            SHOW(insn));
+        } else if (is_static(new_callee)) {
+          always_assert_log(opcode::is_invoke_static(insn->opcode()),
+                            "invalid callsite %s\n",
+                            SHOW(insn));
+        }
       }
-      const auto method =
-          resolve_method(insn->get_method(), opcode_to_search(insn));
-      if (method == nullptr || old_to_new_callee.count(method) == 0) {
-        continue;
-      }
-      auto new_callee = old_to_new_callee.at(method);
-      // At this point, a non static private should not exist.
-      always_assert_log(!is_private(new_callee) || is_static(new_callee),
-                        "%s\n",
-                        vshow(new_callee).c_str());
-      TRACE(REFU, 9, " Updated call %s to %s\n", SHOW(insn), SHOW(new_callee));
-      insn->set_method(new_callee);
-      if (new_callee->is_virtual()) {
-        always_assert_log(is_invoke_virtual(insn->opcode()),
-                          "invalid callsite %s\n",
-                          SHOW(insn));
-      } else if (is_static(new_callee)) {
-        always_assert_log(is_invoke_static(insn->opcode()),
-                          "invalid callsite %s\n",
-                          SHOW(insn));
+    } else {
+      for (auto& mie : InstructionIterable(code)) {
+        auto insn = mie.insn;
+        if (!insn->has_method()) {
+          continue;
+        }
+        const auto method =
+            resolve_method(insn->get_method(), opcode_to_search(insn), meth);
+        if (method == nullptr || old_to_new_callee.count(method) == 0) {
+          continue;
+        }
+        auto new_callee = old_to_new_callee.at(method);
+        // At this point, a non static private should not exist.
+        always_assert_log(!is_private(new_callee) || is_static(new_callee),
+                          "%s\n",
+                          vshow(new_callee).c_str());
+        TRACE(REFU, 9, " Updated call %s to %s", SHOW(insn), SHOW(new_callee));
+        insn->set_method(new_callee);
+        if (new_callee->is_virtual()) {
+          always_assert_log(opcode::is_invoke_virtual(insn->opcode()),
+                            "invalid callsite %s\n",
+                            SHOW(insn));
+        } else if (is_static(new_callee)) {
+          always_assert_log(opcode::is_invoke_static(insn->opcode()),
+                            "invalid callsite %s\n",
+                            SHOW(insn));
+        }
       }
     }
   };
   walk::parallel::code(scope, patcher);
 }
 
-CallSites collect_call_refs(const Scope& scope,
-                            const MethodOrderedSet& callees) {
-  auto patcher = [&](std::nullptr_t, DexMethod* meth) {
+template <typename T>
+CallSites collect_call_refs(const Scope& scope, const T& callees) {
+  if (callees.empty()) {
+    CallSites empty;
+    return empty;
+  }
+  auto patcher = [&](DexMethod* caller) {
     CallSites call_sites;
-    auto code = meth->get_code();
+    auto code = caller->get_code();
     if (!code) {
       return call_sites;
     }
+    if (code->editable_cfg_built()) {
+      auto& cfg = code->cfg();
+      for (auto& mie : cfg::InstructionIterable(cfg)) {
+        auto insn = mie.insn;
+        if (!insn->has_method()) {
+          continue;
+        }
 
-    for (auto& mie : InstructionIterable(meth->get_code())) {
-      auto insn = mie.insn;
-      if (!insn->has_method()) {
-        continue;
+        const auto callee = resolve_method(
+            insn->get_method(),
+            opcode_to_search(const_cast<IRInstruction*>(insn)), caller);
+        if (callee == nullptr || callees.count(callee) == 0) {
+          continue;
+        }
+
+        call_sites.emplace_back(caller, &mie, insn, callee);
+        TRACE(REFU, 9, "  Found call %s from %s", SHOW(insn), SHOW(caller));
       }
+    } else {
+      for (auto& mie : InstructionIterable(caller->get_code())) {
+        auto insn = mie.insn;
+        if (!insn->has_method()) {
+          continue;
+        }
 
-      const auto method =
-          resolve_method(insn->get_method(),
-                         opcode_to_search(const_cast<IRInstruction*>(insn)));
-      if (method == nullptr || callees.count(method) == 0) {
-        continue;
+        const auto callee = resolve_method(
+            insn->get_method(),
+            opcode_to_search(const_cast<IRInstruction*>(insn)), caller);
+        if (callee == nullptr || callees.count(callee) == 0) {
+          continue;
+        }
+
+        call_sites.emplace_back(caller, &mie, insn, callee);
+        TRACE(REFU, 9, "  Found call %s from %s", SHOW(insn), SHOW(caller));
       }
-
-      call_sites.emplace_back(meth, insn);
-      TRACE(REFU, 9, "  Found call %s from %s\n", SHOW(insn), SHOW(meth));
     }
 
     return call_sites;
   };
 
+  struct Append {
+    void operator()(const CallSites& addend, CallSites* accumulator) {
+      accumulator->insert(accumulator->end(), addend.begin(), addend.end());
+    }
+  };
+
   CallSites call_sites =
-      walk::parallel::reduce_methods<std::nullptr_t, CallSites>(
-          scope,
-          patcher,
-          [](CallSites left, CallSites right) {
-            left.insert(left.end(), right.begin(), right.end());
-            return left;
-          },
-          [](int) { return nullptr; });
+      walk::parallel::methods<CallSites, Append>(scope, patcher);
   return call_sites;
+}
+
+using MethodOrderedSet = std::set<DexMethod*, dexmethods_comparator>;
+template CallSites collect_call_refs<MethodOrderedSet>(
+    const Scope& scope, const MethodOrderedSet& callees);
+template CallSites collect_call_refs<std::unordered_set<DexMethod*>>(
+    const Scope& scope, const std::unordered_set<DexMethod*>& callees);
+
+int wrap_instance_call_with_static(
+    DexStoresVector& stores,
+    const std::unordered_map<DexMethod*, DexMethod*>& methods_replacement,
+    bool exclude_primary_dex) {
+  Scope classes;
+  if (!exclude_primary_dex) {
+    classes = build_class_scope(stores);
+  } else {
+    classes = build_class_scope_excluding_primary_dex(stores);
+  }
+  std::unordered_set<DexType*> excluded_types;
+  for (const auto& pair : methods_replacement) {
+    always_assert(!is_static(pair.first));
+    always_assert(is_static(pair.second));
+    excluded_types.insert(pair.second->get_class());
+  }
+  std::atomic<uint32_t> total(0);
+  // The excluded types are supposed to be wrapper and the only callers of the
+  // original methods.
+  walk::parallel::methods(classes, [&](DexMethod* method) {
+    if (excluded_types.count(method->get_class())) {
+      return;
+    }
+    auto code = method->get_code();
+    if (code) {
+      if (code->editable_cfg_built()) {
+        auto& cfg = code->cfg();
+        for (auto& mie : cfg::InstructionIterable(cfg)) {
+          IRInstruction* insn = mie.insn;
+          if (insn->opcode() != OPCODE_INVOKE_VIRTUAL) {
+            continue;
+          }
+          auto method_ref = insn->get_method();
+          auto it =
+              methods_replacement.find(static_cast<DexMethod*>(method_ref));
+          if (it != methods_replacement.end()) {
+            always_assert(is_static(it->second));
+            insn->set_opcode(OPCODE_INVOKE_STATIC);
+            insn->set_method(it->second);
+            ++total;
+          }
+        }
+      } else {
+        for (auto& mie : InstructionIterable(code)) {
+          IRInstruction* insn = mie.insn;
+          if (insn->opcode() != OPCODE_INVOKE_VIRTUAL) {
+            continue;
+          }
+          auto method_ref = insn->get_method();
+          auto it =
+              methods_replacement.find(static_cast<DexMethod*>(method_ref));
+          if (it != methods_replacement.end()) {
+            always_assert(is_static(it->second));
+            insn->set_opcode(OPCODE_INVOKE_STATIC);
+            insn->set_method(it->second);
+            ++total;
+          }
+        }
+      }
+    }
+  });
+  return total;
 }
 
 } // namespace method_reference

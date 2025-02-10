@@ -1,20 +1,20 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
 #include <cstddef>
-#include <fstream>
-#include <unordered_map>
+#include <iosfwd>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "DexClass.h"
+#include "ProguardLineRange.h"
 
 /**
  * ProguardMap parses ProGuard's mapping.txt file that maps de-obfuscated class
@@ -40,16 +40,20 @@
  */
 struct ProguardMap {
   /**
+   * Construct an empty ProGuard map.
+   */
+  explicit ProguardMap() = default;
+
+  /**
    * Construct map from the given file.
    */
-  explicit ProguardMap(const std::string& filename);
+  explicit ProguardMap(const std::string& filename,
+                       bool use_new_rename_map = false);
 
   /**
    * Construct map from a given stream.
    */
-  explicit ProguardMap(std::istream& is) {
-    parse_proguard_map(is);
-  }
+  explicit ProguardMap(std::istream& is) { parse_proguard_map(is); }
 
   /**
    * Translate un-obfuscated class name to obfuscated name.
@@ -81,15 +85,44 @@ struct ProguardMap {
    */
   std::string deobfuscate_method(const std::string& method) const;
 
-  bool empty() const { return m_classMap.empty() && m_fieldMap.empty() &&
-                              m_methodMap.empty() ; }
+  struct Frame {
+    const DexString* method;
+    uint32_t line;
+    Frame(const DexString* s, uint32_t line) : method(s), line(line) {}
+  };
+
+  /**
+   * Translate obfuscated stack frame to un-obfuscated series of frames. The
+   * frames should be ordered with callees preceding their callers.
+   */
+  std::vector<Frame> deobfuscate_frame(const DexString*, uint32_t line) const;
+
+  /**
+   * Obtain line range vector for a given obfuscated method name.
+   */
+  ProguardLineRangeVector& method_lines(const std::string& obfuscated_method);
+
+  bool empty() const {
+    return m_classMap.empty() && m_fieldMap.empty() && m_methodMap.empty();
+  }
+
+  bool is_special_interface(const std::string& type) const {
+    return m_pg_coalesced_interfaces.find(type) !=
+           m_pg_coalesced_interfaces.end();
+  }
 
  private:
   void parse_proguard_map(std::istream& fp);
+  void parse_full_map(std::istream& fp);
 
   bool parse_class(const std::string& line);
   bool parse_field(const std::string& line);
   bool parse_method(const std::string& line);
+
+  bool parse_class_full_format(const std::string& line);
+  bool parse_store_full_format(const std::string& line);
+  bool parse_field_full_format(const std::string& line);
+  bool parse_method_full_format(const std::string& line);
 
  private:
   // Unobfuscated to obfuscated maps
@@ -102,6 +135,19 @@ struct ProguardMap {
   std::unordered_map<std::string, std::string> m_obfFieldMap;
   std::unordered_map<std::string, std::string> m_obfMethodMap;
 
+  // Field map for reflection analysis when type is unknown
+  // Stores Lcom/facebook/Class;.field -> original name without class name
+  std::unordered_map<std::string, std::string> m_obfUntypedFieldMap;
+
+  // Method map for reflection analysis when return type is unknown
+  // Stores Lcom/facebook/Class;.method(II) -> original name without class name
+  std::unordered_map<std::string, std::string> m_obfUntypedMethodMap;
+
+  std::unordered_map<std::string, ProguardLineRangeVector> m_obfMethodLinesMap;
+
+  // Interfaces that are (most likely) coalesced by Proguard.
+  std::unordered_set<std::string> m_pg_coalesced_interfaces;
+
   std::string m_currClass;
   std::string m_currNewClass;
 };
@@ -111,9 +157,19 @@ struct ProguardMap {
  * themselves, so that they're automatically carried through optimization
  * passes.
  */
-void apply_deobfuscated_names(
-  const std::vector<DexClasses>&,
-  const ProguardMap&);
+void apply_deobfuscated_names(const std::vector<DexClasses>&,
+                              const ProguardMap&);
+
+// Exposed for testing purposes.
+namespace pg_impl {
+
+const DexString* file_name_from_method_string(const DexString* method);
+
+void apply_deobfuscated_positions(IRCode*, const ProguardMap&);
+
+std::string_view lines_key(const std::string_view method_name);
+
+} // namespace pg_impl
 
 /**
  * Convert a dot-style name to a dexdump-style name, e.g.:
@@ -121,4 +177,4 @@ void apply_deobfuscated_names(
  *   void -> V
  *   java.util.ArrayList[][] -> [[Ljava/util/ArrayList;
  */
-std::string convert_type(std::string);
+std::string convert_type(std::string_view);

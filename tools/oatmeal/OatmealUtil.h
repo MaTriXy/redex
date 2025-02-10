@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -14,13 +12,14 @@
 #include "file-utils.h"
 
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-//#define DEBUG_LOG
-//#define PERF_LOG
+// #define DEBUG_LOG
+// #define PERF_LOG
 
 #define PACK __attribute__((packed))
 
@@ -71,12 +70,23 @@ bool is_aligned(uint32_t in) {
 }
 
 template <typename T>
-inline T nextPowerOfTwo(T in) {
-  // Turn off all but msb.
-  while ((in & (in - 1u)) != 0) {
-    in &= in - 1u;
-  }
-  return in << 1u;
+inline T clz(T in) {
+  static_assert(sizeof(T) == sizeof(uint64_t) || sizeof(T) == sizeof(uint32_t),
+                "Unsupported size");
+  return (sizeof(T) == sizeof(uint32_t)) ? __builtin_clz(in)
+                                         : __builtin_clzll(in);
+};
+
+// This is a non-standard definition.
+// roundUpToPowerOfTwo(x) = { nextPowerOfTwo(x) iff x < 2
+//                            normalRoundUpToPowerOfTwo(x) iff x >= 2
+// That is, rUp(0) = 1 and rUp(1) = 2, but rUp(2) = 2.
+template <typename T>
+inline T roundUpToPowerOfTwo(T in) {
+  static_assert(std::is_unsigned<T>::value, "Only support unsigned types.");
+  return (in < 2u) ? in + 1
+                   : static_cast<T>(1u)
+                         << (std::numeric_limits<T>::digits - clz(in - 1u));
 }
 
 template <typename T>
@@ -148,7 +158,7 @@ struct WritableBuffer {
   }
 
   void operator<<(const char* to_write) {
-    operator<<(const_cast<char *>(to_write));
+    operator<<(const_cast<char*>(to_write));
   }
 
   void operator<<(const uint16_t* to_write) {
@@ -157,9 +167,7 @@ struct WritableBuffer {
     operator<<(char_write + 1);
   }
 
-  void operator<<(const uint16_t to_write) {
-    operator<<(&to_write);
-  }
+  void operator<<(const uint16_t to_write) { operator<<(&to_write); }
 
   void print(size_t size) {
     size_t start = (current >= size) ? current - size : 0;

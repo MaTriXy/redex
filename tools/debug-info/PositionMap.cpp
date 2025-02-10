@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <boost/scope_exit.hpp>
@@ -39,9 +37,7 @@ std::unique_ptr<PositionMap> read_map(const char* filename) {
               << ") with error: " << strerror(errno) << std::endl;
     return nullptr;
   }
-  BOOST_SCOPE_EXIT_ALL(=, &buf) {
-    munmap(mapping, buf.st_size);
-  };
+  BOOST_SCOPE_EXIT_ALL(=, &buf) { munmap(mapping, buf.st_size); };
   if (magic != 0xfaceb000) {
     std::cerr << "Magic number mismatch\n";
     return nullptr;

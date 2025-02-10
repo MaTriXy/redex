@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -46,7 +44,7 @@ class QuickData {
 
  public:
   // Read Mode
-  QuickData(const char* location);
+  explicit QuickData(const char* location);
 
   // Write Mode
   QuickData() = default;
@@ -57,7 +55,7 @@ class QuickData {
   uint16_t get_field_offset(const std::string& dex,
                             const uint32_t field_idx) const;
 
-  void serialize(std::shared_ptr<FILE*> fd);
+  void serialize(const std::shared_ptr<FILE*>& fd);
 
  private:
   std::map<std::string, uint32_t> dex_to_field_offset_size;

@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -38,8 +36,8 @@
  *
  */
 class Vinfo {
-public:
-  using methods_t = std::unordered_set<const DexMethod *>;
+ public:
+  using methods_t = std::unordered_set<const DexMethod*>;
   struct vinfo_t {
     const DexMethod* decl = nullptr;
     const DexMethod* override_of = nullptr;
@@ -48,7 +46,7 @@ public:
   };
   using vinfos_t = std::unordered_map<const DexMethod*, vinfo_t>;
 
-  Vinfo(const std::vector<DexClass*>& scope);
+  explicit Vinfo(const std::vector<DexClass*>& scope);
 
   /**
    * Finds the topmost declaration of this method.
@@ -97,6 +95,6 @@ public:
    */
   const methods_t& get_override_methods(const DexMethod* meth);
 
-private:
+ private:
   vinfos_t m_vinfos;
 };

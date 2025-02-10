@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <algorithm>
@@ -16,17 +14,19 @@
 #include <memory>
 #include <sstream>
 
+#include <sparta/HashedSetAbstractDomain.h>
+#include <sparta/MonotonicFixpointIterator.h>
+
 #include "ControlFlow.h"
-#include "DexClass.h"
 #include "DexInstruction.h"
-#include "DexLoader.h"
+#include "DexPosition.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
-#include "RedexContext.h"
+#include "RedexTest.h"
+#include "Show.h"
 
-#include "FixpointIterators.h"
-#include "HashedSetAbstractDomain.h"
+using namespace sparta;
 
 /*
  * The abstract domain for liveness is just the powerset domain of registers,
@@ -46,7 +46,7 @@ class IRFixpointIterator final
   using NodeId = cfg::Block*;
 
   explicit IRFixpointIterator(const cfg::ControlFlowGraph& cfg)
-      : MonotonicFixpointIterator(cfg, cfg.blocks().size()), m_cfg(cfg) {}
+      : MonotonicFixpointIterator(cfg, cfg.num_blocks()), m_cfg(cfg) {}
 
   void analyze_node(const NodeId& block,
                     LivenessDomain* current_state) const override {
@@ -69,7 +69,7 @@ class IRFixpointIterator final
   void analyze_instruction(const IRInstruction* insn,
                            LivenessDomain* current_state) const {
     // This is the standard semantic definition of liveness.
-    if (insn->dests_size()) {
+    if (insn->has_dest()) {
       // The destination register of an instruction is dead.
       current_state->remove(get_register(insn->dest()));
     }
@@ -102,22 +102,12 @@ class IRFixpointIterator final
   const cfg::ControlFlowGraph& m_cfg;
 };
 
-TEST(MonotonicFixpointTest, livenessAnalysis) {
-  g_redex = new RedexContext();
+class MonotonicFixpointTest : public RedexIntegrationTest {};
 
-  const char* dexfile = std::getenv("dexfile");
-  ASSERT_NE(nullptr, dexfile);
+TEST_F(MonotonicFixpointTest, livenessAnalysis) {
+  std::cout << "Loaded classes: " << classes->size() << std::endl;
 
-  std::vector<DexStore> stores;
-  DexMetadata dm;
-  dm.set_id("classes");
-  DexStore root_store(dm);
-  root_store.add_classes(load_classes_from_dex(dexfile));
-  DexClasses& classes = root_store.get_dexen().back();
-  stores.emplace_back(std::move(root_store));
-  std::cout << "Loaded classes: " << classes.size() << std::endl;
-
-  for (const auto& cls : classes) {
+  for (const auto& cls : *classes) {
     if (std::strcmp(cls->get_name()->c_str(),
                     "Lcom/facebook/redextest/MonotonicFixpoint;") == 0) {
       for (const auto& method : cls->get_vmethods()) {
@@ -157,7 +147,9 @@ TEST(MonotonicFixpointTest, livenessAnalysis) {
               EXPECT_EQ(0, live_out.size());
               break;
             }
-            default: { FAIL() << "Unexpected block"; }
+            default: {
+              FAIL() << "Unexpected block";
+            }
             }
 
             // Checking the live in/out variables at position instructions.
@@ -169,18 +161,18 @@ TEST(MonotonicFixpointTest, livenessAnalysis) {
               }
               if (it->type == MFLOW_POSITION) {
                 switch (it->pos->line) {
-                case 48: {
+                case 46: {
                   EXPECT_THAT(live_out.elements(),
                               ::testing::UnorderedElementsAre("v0", "v2"));
                   break;
                 }
-                case 49:
-                case 50: {
+                case 47:
+                case 48: {
                   EXPECT_THAT(live_out.elements(),
                               ::testing::UnorderedElementsAre("v1", "v2"));
                   break;
                 }
-                case 51: {
+                case 49: {
                   EXPECT_THAT(live_out.elements(),
                               ::testing::UnorderedElementsAre("v0", "v2"));
                   break;
@@ -192,7 +184,5 @@ TEST(MonotonicFixpointTest, livenessAnalysis) {
         }
       }
     }
-
-    delete g_redex;
   }
 }

@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -13,66 +11,69 @@
 
 #include "DexClass.h"
 #include "DexUtil.h"
+#include "JsonWrapper.h"
 
-void init_reachable_classes(
-    const Scope& scope,
-    const Json::Value& config,
-    const redex::ProguardConfiguration& pg_config,
-    const std::unordered_set<DexType*>& no_optimizations_anno);
-void recompute_classes_reachable_from_code(const Scope& scope);
+struct ReachableClassesConfig {
+  std::string apk_dir;
+  std::vector<std::string> reflected_package_names;
+  std::unordered_set<std::string> prune_unexported_components;
+  bool compute_xml_reachability = true;
+  bool analyze_native_lib_reachability = true;
+  std::vector<std::string> keep_methods;
+  std::vector<std::string> json_serde_supercls;
+  std::vector<std::string> fbjni_json_files;
 
-// Note: The lack of convenience functions for DexType* is intentional. By doing
-// so, it implies you need to nullptr check. Which is evil because it sprinkles
-// nullptr checks everywhere.
+  ReachableClassesConfig() {}
 
-// can_delete is to be deprecated function for determining if something can be
-// deleted. We should find each and every use of can_delete and replace it with
-// can_delete_if_unused with appropriate logic to ensure the class or member
-// being deleted can be safely removed.
+  explicit ReachableClassesConfig(const JsonWrapper& config) {
+    config.get("apk_dir", "", apk_dir);
+    config.get("keep_packages", {}, reflected_package_names);
+
+    config.get("compute_xml_reachability", true, compute_xml_reachability);
+    config.get("prune_unexported_components", {}, prune_unexported_components);
+    config.get("analyze_native_lib_reachability", true,
+               analyze_native_lib_reachability);
+
+    config.get("keep_methods", {}, keep_methods);
+    config.get("json_serde_supercls", {}, json_serde_supercls);
+    config.get("fbjni_json_files", {}, fbjni_json_files);
+  }
+};
+
+void init_reachable_classes(const Scope& scope,
+                            const ReachableClassesConfig& config);
+
+void recompute_reachable_from_xml_layouts(const Scope& scope,
+                                          const std::string& apk_dir);
+
 template <class DexMember>
 inline bool can_delete(DexMember* member) {
-  return member->rstate.can_delete();
+  return !member->is_external() && member->rstate.can_delete();
+}
+
+template <class DexMember>
+inline bool root(DexMember* member) {
+  return !can_delete(member);
 }
 
 template <class DexMember>
 inline bool can_rename(DexMember* member) {
-  return member->rstate.can_rename();
-}
-
-// A temporary measure to allow the RenamerV2 pass to rename classes that would
-// other not be renamable due to any top level blanket keep rules.
-template <class DexMember>
-inline bool can_rename_if_ignoring_blanket_keepnames(DexMember* member) {
-  return can_rename(member) || member->rstate.is_blanket_names_kept();
+  return !member->is_external() && member->rstate.can_rename();
 }
 
 template <class DexMember>
-inline bool keep(DexMember* member) {
-  return member->rstate.keep();
+inline bool can_rename_if_also_renaming_xml(DexMember* member) {
+  return member->rstate.can_rename_if_also_renaming_xml();
 }
 
-template <class DexMember>
-inline bool allowshrinking(DexMember* member) {
-  return member->rstate.allowshrinking();
+inline bool is_serde(const DexClass* member) {
+  return member->rstate.is_serde();
 }
 
-template <class DexMember>
-inline bool allowobfuscation(DexMember* member) {
-  return member->rstate.allowobfuscation();
+inline bool marked_by_string(const DexClass* member) {
+  return member->rstate.is_referenced_by_string();
 }
 
-template <class DexMember>
-inline bool assumenosideeffects(DexMember* member) {
+inline bool assumenosideeffects(const DexMethod* member) {
   return member->rstate.assumenosideeffects();
-}
-
-// Note: Redex currently doesn't implement allowoptimization, -keepnames,
-// -keepclassmembernames, -keepclasseswithmembernames.
-
-// root is an attempt to identify a root for reachability analysis by using any
-// class or member that has keep set on it but does not have allowshrinking set
-// on it.
-template<class DexMember>
-inline bool root(DexMember* member) {
-  return keep(member) && !allowshrinking(member);
 }

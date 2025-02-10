@@ -1,38 +1,35 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <string>
 
 #include "Creators.h"
 #include "DexAsm.h"
-#include "Inliner.h"
 #include "IRCode.h"
+#include "LegacyInliner.h"
 #include "TestGenerator.h"
 #include "Util.h"
 
 class InlinerTestAliasedInputs : public EquivalenceTest {
   DexMethod* m_callee;
+
  public:
-  std::string test_name() override {
-    return "InlinerTestAliasedInputs";
-  }
+  std::string test_name() override { return "InlinerTestAliasedInputs"; }
 
   void setup(DexClass* cls) override {
     auto ret = DexType::make_type("I");
     auto arg = DexType::make_type("I");
     auto args = DexTypeList::make_type_list({arg, arg});
     auto proto = DexProto::make_proto(ret, args); // I(I, I)
-    m_callee = static_cast<DexMethod*>(
+    m_callee =
         DexMethod::make_method(cls->get_type(),
                                DexString::make_string("callee_" + test_name()),
-                               proto));
-    m_callee->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+                               proto)
+            ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
     m_callee->set_code(std::make_unique<IRCode>(m_callee, 0));
     {
       using namespace dex_asm;
@@ -52,7 +49,7 @@ class InlinerTestAliasedInputs : public EquivalenceTest {
     mt->push_back(dasm(OPCODE_CONST, {0_v, 0x1_L}));
 
     auto invoke = new IRInstruction(OPCODE_INVOKE_STATIC);
-    invoke->set_method(m_callee)->set_arg_word_count(2);
+    invoke->set_method(m_callee)->set_srcs_size(2);
     // reusing the same register for two separate arguments
     invoke->set_src(0, 0);
     invoke->set_src(1, 0);
@@ -70,12 +67,12 @@ class InlinerTestAliasedInputs : public EquivalenceTest {
     for (auto it = ii.begin(); it != end; ++it) {
       auto insn = it->insn;
       if (insn->opcode() == OPCODE_INVOKE_STATIC) {
-        assert(insn->get_method() == m_callee);
+        redex_assert(insn->get_method() == m_callee);
         invoke_it = it.unwrap();
         break;
       }
     }
-    inliner::inline_method(m->get_code(), m_callee->get_code(), invoke_it);
+    legacy_inliner::inline_method(m, m_callee->get_code(), invoke_it);
   }
 };
 
@@ -83,18 +80,20 @@ REGISTER_TEST(InlinerTestAliasedInputs);
 
 class InlinerTestLargeIfOffset : public EquivalenceTest {
   const size_t NOP_COUNT = 1 << 15;
+
  protected:
   DexMethod* m_callee;
+
  public:
   void setup(DexClass* cls) override {
     auto ret = DexType::make_type("V");
     auto args = DexTypeList::make_type_list({});
     auto proto = DexProto::make_proto(ret, args); // V()
-    m_callee = static_cast<DexMethod*>(
+    m_callee =
         DexMethod::make_method(cls->get_type(),
                                DexString::make_string("callee_" + test_name()),
-                               proto));
-    m_callee->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+                               proto)
+            ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
     m_callee->set_code(std::make_unique<IRCode>(m_callee, 1));
     using namespace dex_asm;
     auto mt = m_callee->get_code();
@@ -121,7 +120,7 @@ class InlinerTestLargeIfOffset : public EquivalenceTest {
     auto branch = new MethodItemEntry(dasm(if_op(), {1_v}));
     mt->push_back(*branch);
     auto invoke = new IRInstruction(OPCODE_INVOKE_STATIC);
-    invoke->set_method(m_callee)->set_arg_word_count(0);
+    invoke->set_method(m_callee)->set_srcs_size(0);
     mt->push_back(invoke);
     mt->push_back(dasm(OPCODE_ADD_INT, {1_v, 1_v, 2_v}));
     // fallthrough to main block
@@ -139,12 +138,12 @@ class InlinerTestLargeIfOffset : public EquivalenceTest {
     for (auto it = ii.begin(); it != end; ++it) {
       auto insn = it->insn;
       if (insn->opcode() == OPCODE_INVOKE_STATIC) {
-        assert(insn->get_method() == m_callee);
+        redex_assert(insn->get_method() == m_callee);
         invoke_it = it.unwrap();
         break;
       }
     }
-    inliner::inline_method(m->get_code(), m_callee->get_code(), invoke_it);
+    legacy_inliner::inline_method(m, m_callee->get_code(), invoke_it);
     // make sure we actually bloated the method
     always_assert(m->get_code()->count_opcodes() > NOP_COUNT);
   }
@@ -152,22 +151,22 @@ class InlinerTestLargeIfOffset : public EquivalenceTest {
 
 class InlinerTestLargeIfOffsetTrueBranch : public InlinerTestLargeIfOffset {
  public:
-  virtual std::string test_name() {
+  std::string test_name() override {
     return "InlinerTestLargeIfOffsetTrueBranch";
   }
 
-  virtual IROpcode if_op() { return OPCODE_IF_NEZ; }
+  IROpcode if_op() override { return OPCODE_IF_NEZ; }
 };
 
 REGISTER_TEST(InlinerTestLargeIfOffsetTrueBranch);
 
 class InlinerTestLargeIfOffsetFalseBranch : public InlinerTestLargeIfOffset {
  public:
-  virtual std::string test_name() {
+  std::string test_name() override {
     return "InlinerTestLargeIfOffsetFalseBranch";
   }
 
-  virtual IROpcode if_op() { return OPCODE_IF_EQZ; }
+  IROpcode if_op() override { return OPCODE_IF_EQZ; }
 };
 
 REGISTER_TEST(InlinerTestLargeIfOffsetFalseBranch);

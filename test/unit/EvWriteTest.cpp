@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <algorithm>
@@ -16,9 +14,12 @@
 
 void testcase(uint64_t value, std::initializer_list<uint8_t> t) {
   uint8_t buf[16] = {0};
-  uint8_t* bufp = buf;
   int size = (t.end() - t.begin()) - 1;
-  type_encoder_signext(bufp, DEVT_INT, value);
+  std::vector<uint8_t> vbuf;
+  type_encoder_signext(vbuf, DEVT_INT, value);
+  for (size_t i = 0; i < 16 && i < vbuf.size(); i++)
+    buf[i] = vbuf[i];
+  uint8_t* bufp = buf + vbuf.size();
   EXPECT_EQ(bufp - buf, size + 2);
   EXPECT_EQ(buf[0], ((size << 5) | DEVT_INT));
   EXPECT_EQ(true, std::equal(t.begin(), t.end(), buf + 1));
@@ -26,7 +27,7 @@ void testcase(uint64_t value, std::initializer_list<uint8_t> t) {
 
 TEST(EvWriteTest, empty) {
   uint8_t buf[16] = {0};
-  uint8_t* bufp = buf;
+  [[maybe_unused]] uint8_t* bufp = buf;
 
   testcase(0xffffffffffffff37, {0x37, 0xff});
   testcase(0x37, {0x37});

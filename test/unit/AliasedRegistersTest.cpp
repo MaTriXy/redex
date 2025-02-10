@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <gtest/gtest.h>
@@ -14,6 +12,7 @@
 #include <unordered_map>
 
 using namespace aliased_registers;
+using namespace sparta;
 
 Value zero = Value::create_register(0);
 Value one = Value::create_register(1);
@@ -21,7 +20,7 @@ Value two = Value::create_register(2);
 Value three = Value::create_register(3);
 Value four = Value::create_register(4);
 
-Value one_lit = Value::create_literal(1);
+Value int_one_lit = Value::create_literal(1, constant_uses::TypeDemand::Int);
 
 TEST(AliasedRegistersTest, identity) {
   AliasedRegisters a;
@@ -165,8 +164,8 @@ TEST(AliasedRegistersTest, transitiveCycleBreak) {
 TEST(AliasedRegistersTest, getRepresentative) {
   AliasedRegisters a;
   a.move(zero, one);
-  Register zero_rep = a.get_representative(zero);
-  Register one_rep = a.get_representative(one);
+  reg_t zero_rep = a.get_representative(zero);
+  reg_t one_rep = a.get_representative(one);
   EXPECT_EQ(1, zero_rep);
   EXPECT_EQ(1, one_rep);
 }
@@ -175,9 +174,9 @@ TEST(AliasedRegistersTest, getRepresentativeTwoLinks) {
   AliasedRegisters a;
   a.move(zero, one);
   a.move(two, zero);
-  Register zero_rep = a.get_representative(zero);
-  Register one_rep = a.get_representative(one);
-  Register two_rep = a.get_representative(two);
+  reg_t zero_rep = a.get_representative(zero);
+  reg_t one_rep = a.get_representative(one);
+  reg_t two_rep = a.get_representative(two);
   EXPECT_EQ(1, zero_rep);
   EXPECT_EQ(1, one_rep);
   EXPECT_EQ(1, two_rep);
@@ -202,7 +201,7 @@ TEST(AliasedRegistersTest, breakLineGraph) {
 
 TEST(AliasedRegistersTest, getRepresentativeNone) {
   AliasedRegisters a;
-  Register zero_rep = a.get_representative(zero);
+  reg_t zero_rep = a.get_representative(zero);
   EXPECT_EQ(0, zero_rep);
 }
 
@@ -211,20 +210,20 @@ TEST(AliasedRegistersTest, getRepresentativeTwoComponents) {
   a.move(zero, one);
   a.move(two, three);
 
-  Register zero_rep = a.get_representative(zero);
-  Register one_rep = a.get_representative(one);
+  reg_t zero_rep = a.get_representative(zero);
+  reg_t one_rep = a.get_representative(one);
   EXPECT_EQ(1, zero_rep);
   EXPECT_EQ(1, one_rep);
 
-  Register two_rep = a.get_representative(two);
-  Register three_rep = a.get_representative(three);
+  reg_t two_rep = a.get_representative(two);
+  reg_t three_rep = a.get_representative(three);
   EXPECT_EQ(3, two_rep);
   EXPECT_EQ(3, three_rep);
 }
 
 TEST(AliasedRegistersTest, getRepresentativeNoLits) {
   AliasedRegisters a;
-  a.move(two, one_lit);
+  a.move(two, int_one_lit);
   auto two_rep = a.get_representative(two);
   EXPECT_EQ(2, two_rep);
 }
@@ -289,26 +288,6 @@ TEST(AliasedRegistersTest, AbstractValueEqualsAndClear) {
   EXPECT_TRUE(a.equals(a));
   EXPECT_TRUE(b.equals(b));
   EXPECT_FALSE(a.equals(b));
-}
-
-TEST(AliasedRegistersTest, AbstractValueMeet) {
-  AliasedRegisters a;
-  AliasedRegisters b;
-
-  a.move(zero, one);
-  b.move(two, one);
-
-  a.meet_with(b);
-
-  EXPECT_TRUE(a.are_aliases(zero, one));
-  EXPECT_TRUE(a.are_aliases(two, one));
-  EXPECT_TRUE(a.are_aliases(zero, two));
-  EXPECT_FALSE(a.are_aliases(zero, three));
-
-  EXPECT_FALSE(b.are_aliases(zero, one));
-  EXPECT_TRUE(b.are_aliases(one, two));
-  EXPECT_FALSE(b.are_aliases(zero, two));
-  EXPECT_FALSE(b.are_aliases(zero, three));
 }
 
 TEST(AliasedRegistersTest, AbstractValueJoinNone) {

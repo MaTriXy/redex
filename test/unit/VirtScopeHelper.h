@@ -1,16 +1,14 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include "DexClass.h"
 #include "DexAccess.h"
+#include "DexClass.h"
 
 const int OBJ_METH_NAMES = 9;
 const int OBJ_METHS = 11;
@@ -95,6 +93,8 @@ std::vector<DexClass*> create_scope_5();
  */
 std::vector<DexClass*> create_scope_6();
 
+/* clang-format off */
+
 /**
  * interface Intf1 { void f(); }
  * interface Intf2 { void g(int); }
@@ -112,6 +112,9 @@ std::vector<DexClass*> create_scope_6();
  *     class D extends C implements Intf2 { void f() {} void g(int) {} }
  *     class E extends C { void g() {} void g(int) {}}
  */
+
+/* clang-format on */
+
 std::vector<DexClass*> create_scope_7();
 
 /**

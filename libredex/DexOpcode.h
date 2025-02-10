@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -13,7 +11,6 @@
 #include <string>
 
 #include "DexOpcodeDefs.h"
-#include "Show.h"
 
 std::string show(DexOpcode);
 
@@ -26,7 +23,7 @@ const size_t NON_RANGE_MAX = 5;
 
 OpcodeFormat format(DexOpcode opcode);
 
-unsigned dests_size(DexOpcode);
+bool has_dest(DexOpcode);
 // we can't tell the srcs size from the opcode alone -- format 35c opcodes
 // encode that separately. So this just returns the minimum.
 unsigned min_srcs_size(DexOpcode);
@@ -60,6 +57,8 @@ inline bool is_switch(DexOpcode op) {
 
 bool is_goto(DexOpcode);
 
+bool is_move(DexOpcode);
+
 DexOpcode invert_conditional_branch(DexOpcode op);
 
 inline bool is_invoke_range(DexOpcode op) {
@@ -90,6 +89,14 @@ inline bool is_sput(DexOpcode op) {
 
 inline bool is_sget(DexOpcode op) {
   return op >= DOPCODE_SGET && op <= DOPCODE_SGET_SHORT;
+}
+
+inline bool is_literal_const(DexOpcode op) {
+  return op >= DOPCODE_CONST_4 && op <= DOPCODE_CONST_WIDE_HIGH16;
+}
+
+inline bool is_return(DexOpcode op) {
+  return op >= DOPCODE_RETURN_VOID && op <= DOPCODE_RETURN_OBJECT;
 }
 
 } // namespace dex_opcode

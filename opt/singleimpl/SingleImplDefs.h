@@ -1,24 +1,29 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
 #include <memory>
-#include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
-#include "DexClass.h"
-#include "IRInstruction.h"
-#include "SingleImpl.h"
+#include "CheckCastTransform.h"
 #include "ClassHierarchy.h"
+#include "ControlFlow.h"
+#include "DexClass.h"
+#include "SingleImpl.h"
+
+namespace api {
+class AndroidSDK;
+} // namespace api
+
+struct ProguardMap;
 
 /**
  * Analyze and optimize data structures.
@@ -63,8 +68,8 @@ enum EscapeReason : uint32_t {
   FILTERED = 0x80,
   // parent is unknown to redex
   IMPL_PARENT_ESCAPED = 0x100,
-  // method in interface refers to the interface itself
-  SELF_REFERENCE = 0X200,
+  // interface is reference as a return type of a method
+  HAS_RETURN_REF = 0x200,
   // interface marked DoNotStrip
   DO_NOT_STRIP = 0X400,
   // create a reference across stores that is illegal
@@ -122,6 +127,13 @@ struct SingleImplData {
   // opcodes to a methodref with the single impl interface in the signature
   MethodToOpcodes methodrefs;
 
+  std::unordered_map<
+      DexMethod*,
+      std::unordered_map<IRInstruction*, cfg::InstructionIterator>>
+      referencing_methods;
+
+  std::mutex mutex;
+
   bool is_escaped() const { return escape != NO_ESCAPE; }
 };
 
@@ -129,12 +141,17 @@ struct SingleImplData {
 using SingleImpls = std::unordered_map<DexType*, SingleImplData>;
 
 struct SingleImplAnalysis {
+  virtual ~SingleImplAnalysis() = default;
+
   /**
    * Create a SingleImplAnalysis from a given Scope.
    */
   static std::unique_ptr<SingleImplAnalysis> analyze(
-      const Scope& scope, const DexStoresVector& stores,
-      const TypeMap& single_impl, const TypeSet& intfs,
+      const Scope& scope,
+      const DexStoresVector& stores,
+      const TypeMap& single_impl,
+      const TypeSet& intfs,
+      const ProguardMap& pg_map,
       const SingleImplConfig& config);
 
   /**
@@ -172,11 +189,27 @@ struct SingleImplAnalysis {
   SingleImpls single_impls;
 };
 
+struct OptimizeStats {
+  size_t removed_interfaces{0};
+  size_t inserted_check_casts{0};
+  size_t retained_check_casts{0};
+  check_casts::impl::Stats post_process;
+  size_t deleted_removed_instructions{0};
+  OptimizeStats& operator+=(const OptimizeStats& rhs) {
+    removed_interfaces += rhs.removed_interfaces;
+    inserted_check_casts += rhs.inserted_check_casts;
+    retained_check_casts += rhs.retained_check_casts;
+    post_process += rhs.post_process;
+    deleted_removed_instructions += rhs.deleted_removed_instructions;
+    return *this;
+  }
+};
+
 /**
  * Run an optimization pass over a SingleImplAnalysis.
  */
-size_t optimize(
-    std::unique_ptr<SingleImplAnalysis> analysis,
-    const ClassHierarchy& ch,
-    Scope& scope,
-    const SingleImplConfig& config);
+OptimizeStats optimize(std::unique_ptr<SingleImplAnalysis> analysis,
+                       const ClassHierarchy& ch,
+                       Scope& scope,
+                       const SingleImplConfig& config,
+                       const api::AndroidSDK& api);

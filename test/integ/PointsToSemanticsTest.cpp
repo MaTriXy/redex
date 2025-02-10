@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "PointsToSemantics.h"
@@ -16,13 +14,12 @@
 #include <string>
 #include <vector>
 
-#include "DexClass.h"
-#include "DexLoader.h"
-#include "DexStore.h"
 #include "DexUtil.h"
 #include "IRAssembler.h"
 #include "JarLoader.h"
-#include "RedexContext.h"
+#include "RedexTest.h"
+
+using namespace sparta;
 
 std::set<std::string> method_semantics = {
     // PointsToSemantics' class initializer
@@ -304,28 +301,11 @@ void patch_filled_new_array_test(Scope& scope) {
   }
 }
 
-TEST(PointsToSemanticsTest, semanticActionGeneration) {
-  g_redex = new RedexContext();
+class PointsToSemanticsTest : public RedexIntegrationTest {};
 
-  std::vector<DexStore> stores;
-  DexMetadata dm;
-  dm.set_id("classes");
-  DexStore root_store(dm);
-
-  const char* dexfile = std::getenv("dexfile");
-  ASSERT_NE(nullptr, dexfile);
-  root_store.add_classes(load_classes_from_dex(dexfile));
-  stores.emplace_back(std::move(root_store));
-
-  const char* android_sdk = std::getenv("ANDROID_SDK");
-  ASSERT_NE(nullptr, android_sdk);
-  const char* android_target = std::getenv("android_target");
-  ASSERT_NE(nullptr, android_target);
-  std::string android_version(android_target);
-  ASSERT_NE("NotFound", android_version);
-  std::string sdk_jar = std::string(android_sdk) + "/platforms/" +
-                        android_version + "/android.jar";
-  ASSERT_TRUE(load_jar_file(sdk_jar.c_str()));
+TEST_F(PointsToSemanticsTest, semanticActionGeneration) {
+  std::string sdk_jar = android_sdk_jar_path();
+  ASSERT_TRUE(load_jar_file(DexLocation::make_location("", sdk_jar)));
 
   DexStoreClassesIterator it(stores);
   Scope scope = build_class_scope(it);
@@ -368,6 +348,4 @@ TEST(PointsToSemanticsTest, semanticActionGeneration) {
     deserialization.insert(out.str());
   }
   EXPECT_THAT(deserialization, ::testing::ContainerEq(method_semantics));
-
-  delete g_redex;
 }

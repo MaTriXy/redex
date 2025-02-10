@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -13,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 /*
  * Stringification functions for core types.  Definitions are in DexClass.cpp
@@ -35,11 +34,13 @@ class DexAnnotationDirectory;
 class DexDebugInstruction;
 class IRInstruction;
 class IRCode;
+class DexCallSite;
+class DexMethodHandle;
 
 namespace cfg {
 class Block;
 class ControlFlowGraph;
-}
+} // namespace cfg
 
 struct MethodItemEntry;
 struct DexDebugEntry;
@@ -98,7 +99,11 @@ std::ostream& operator<<(std::ostream&, const DexString&);
 std::ostream& operator<<(std::ostream&, const DexType&);
 std::ostream& operator<<(std::ostream&, const DexClass&);
 std::ostream& operator<<(std::ostream&, const DexPosition&);
+std::ostream& operator<<(std::ostream&, const DexFieldRef&);
+std::ostream& operator<<(std::ostream&, const IRInstruction&);
 std::ostream& operator<<(std::ostream&, const MethodItemEntry&);
+std::ostream& operator<<(std::ostream&, const DexCallSite&);
+std::ostream& operator<<(std::ostream&, const DexMethodHandle&);
 
 std::string show(const DexFieldRef*);
 std::string show(const DexDebugEntry*);
@@ -121,12 +126,17 @@ std::string show(const ir_list::InstructionIterable&);
 std::string show(const SwitchIndices& si);
 
 // Variants of show that use deobfuscated names
+std::string show_deobfuscated(const DexType* t);
 std::string show_deobfuscated(const DexClass*);
 std::string show_deobfuscated(const DexAnnotation*);
 std::string show_deobfuscated(const DexFieldRef*);
 std::string show_deobfuscated(const DexMethodRef*);
 std::string show_deobfuscated(const IRInstruction*);
 std::string show_deobfuscated(const DexEncodedValue*);
+std::string show_deobfuscated(const DexTypeList*);
+std::string show_deobfuscated(const DexProto*);
+std::string show_deobfuscated(const DexCallSite*);
+std::string show_deobfuscated(const DexMethodHandle*);
 
 // SHOW(x) is syntax sugar for show(x).c_str()
 #define SHOW(...) show(__VA_ARGS__).c_str()
@@ -141,5 +151,13 @@ std::string show_context(IRCode const*, IRInstruction const*);
 std::string vshow(const DexClass*);
 std::string vshow(const DexMethod*, bool include_annotations = true);
 std::string vshow(const DexField*);
-std::string vshow(uint32_t acc); // for modifiers
+std::string vshow(uint32_t acc, bool is_method = true); // DexAccessFlags
 std::string vshow(const DexType*);
+
+// Format a number as a byte entity.
+std::string pretty_bytes(uint64_t val);
+
+// Format the items of given width as human readable hex strings.
+std::vector<std::string> pretty_array_data_payload(const uint16_t ewidth,
+                                                   const uint32_t element_count,
+                                                   const uint16_t* data);

@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -13,6 +11,7 @@
 
 #include "DexClass.h"
 #include "IRInstruction.h"
+#include "TypeUtil.h"
 
 /*
  * This class contains a set of utility functions used to build the points-to
@@ -32,8 +31,6 @@ class PointsToSemanticsUtils final {
   PointsToSemanticsUtils& operator=(const PointsToSemanticsUtils& other) =
       delete;
 
-  DexType* get_throwable_type() const { return m_throwable_type; }
-
   bool is_primitive_type_wrapper(DexType* dex_type) const {
     return m_primitive_type_wrappers.count(dex_type) > 0;
   }
@@ -47,18 +44,14 @@ class PointsToSemanticsUtils final {
   bool is_get_class_invocation(IRInstruction* insn) const;
 
  private:
-  DexType* m_throwable_type{DexType::make_type("Ljava/lang/Throwable;")};
   std::unordered_set<DexType*> m_primitive_type_wrappers{
-      {DexType::make_type("Ljava/lang/Boolean;"),
-       DexType::make_type("Ljava/lang/Byte;"),
-       DexType::make_type("Ljava/lang/Character;"),
-       DexType::make_type("Ljava/lang/Double;"),
-       DexType::make_type("Ljava/lang/Float;"),
-       DexType::make_type("Ljava/lang/Integer;"),
-       DexType::make_type("Ljava/lang/Long;"),
-       DexType::make_type("Ljava/lang/Short;"),
-       DexType::make_type("Ljava/lang/Void;")}};
-  DexString* m_wrapper_class_type_field_name{DexString::make_string("TYPE")};
+      type::java_lang_Boolean(),   type::java_lang_Byte(),
+      type::java_lang_Character(), type::java_lang_Double(),
+      type::java_lang_Float(),     type::java_lang_Integer(),
+      type::java_lang_Long(),      type::java_lang_Short(),
+      type::java_lang_Void()};
+  const DexString* m_wrapper_class_type_field_name{
+      DexString::make_string("TYPE")};
   DexMethodRef* m_java_lang_object_get_class{DexMethod::make_method(
       DexType::make_type("Ljava/lang/Object;"),
       DexString::make_string("getClass"),

@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "Transform.h"
@@ -34,7 +32,7 @@ void remap_debug(DexDebugInstruction& dbgop, const RegMap& reg_map) {
 }
 
 void remap_dest(IRInstruction* inst, const RegMap& reg_map) {
-  if (!inst->dests_size()) return;
+  if (!inst->has_dest()) return;
   auto it = reg_map.find(inst->dest());
   if (it == reg_map.end()) return;
   inst->set_dest(it->second);
@@ -70,60 +68,21 @@ void remap_registers(MethodItemEntry& mei, const RegMap& reg_map) {
   }
 }
 
-
 void remap_registers(IRCode* code, const RegMap& reg_map) {
-  for (auto& mei : *code) {
+  if (!code->editable_cfg_built()) {
+    for (auto& mei : *code) {
+      remap_registers(mei, reg_map);
+    }
+  } else {
+    for (auto& mei : cfg::InstructionIterable(code->cfg())) {
+      remap_registers(mei, reg_map);
+    }
+  }
+}
+void remap_registers(cfg::ControlFlowGraph& cfg, const RegMap& reg_map) {
+  for (auto& mei : cfg::InstructionIterable(cfg)) {
     remap_registers(mei, reg_map);
   }
-}
-
-static size_t remove_block(IRCode* code, cfg::Block* b) {
-  size_t insns_removed{0};
-  for (auto& mei : InstructionIterable(b)) {
-    code->remove_opcode(mei.insn);
-    ++insns_removed;
-  }
-  return insns_removed;
-}
-
-void visit(cfg::Block* start, std::unordered_set<cfg::Block*>& visited) {
-  std::stack<cfg::Block*> to_visit;
-  to_visit.push(start);
-  while (!to_visit.empty()) {
-    cfg::Block* b = to_visit.top();
-    to_visit.pop();
-
-    if (visited.find(b) != visited.end()) {
-      continue;
-    }
-    visited.emplace(b);
-
-    for (auto& s : b->succs()) {
-      to_visit.push(s->target());
-    }
-  }
-}
-
-size_t remove_unreachable_blocks(IRCode* code) {
-  auto& cfg = code->cfg();
-  const auto& blocks = cfg.blocks();
-  size_t insns_removed{0};
-
-  // remove unreachable blocks
-  std::unordered_set<cfg::Block*> visited;
-  visit(blocks.at(0), visited);
-  for (size_t i = 1; i < blocks.size(); ++i) {
-    auto& b = blocks.at(i);
-    if (visited.find(b) != visited.end()) {
-      continue;
-    }
-    // Remove all successor edges. Note that we don't need to try and remove
-    // predecessors since by definition, unreachable blocks have no preds
-    cfg.remove_succ_edges(b);
-    insns_removed += remove_block(code, b);
-  }
-
-  return insns_removed;
 }
 
 MethodItemEntry* find_active_catch(IRCode* code, IRList::iterator pos) {

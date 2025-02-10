@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 package com.facebook.redex.test.instr;
@@ -168,6 +166,23 @@ class UsingNoEscapeBuilder {
     }
 
     return new Bar(value);
+  }
+
+  public Bar initializeBarDifferentBranchesSameValues() {
+    Random randomGen = new Random();
+    int value = randomGen.nextInt(10);
+    Bar.Builder builder = new Bar.Builder();
+
+    int x = 7;
+    if (value < 6) {
+      builder.x = x;
+    } else if (value > 9) {
+      builder.x = x;
+    } else {
+      builder.x = 91;
+    }
+
+    return builder.build();
   }
 
   public Car initializeNullCarModel(int version) {

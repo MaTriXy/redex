@@ -1,16 +1,16 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
 #include <string>
 #include <vector>
+
+#include "Debug.h"
 
 /*
  * Quickly concatenate std::strings
@@ -40,7 +40,7 @@ class StaticStringBuilder {
   StaticStringBuilder& operator<<(std::string&& s) {
     always_assert(m_index < num_strings);
     m_total_chars += s.size();
-    m_strings[m_index] = s;
+    m_strings[m_index] = std::move(s);
     ++m_index;
     return *this;
   }
@@ -48,8 +48,8 @@ class StaticStringBuilder {
   std::string str() const {
     std::string result;
     result.reserve(m_total_chars);
-    for (const auto& s : m_strings) {
-      result += s;
+    for (uint32_t i = 0; i < m_index; ++i) {
+      result += m_strings[i];
     }
     return result;
   }
@@ -62,14 +62,14 @@ class StaticStringBuilder {
 
 class DynamicStringBuilder {
  public:
-  DynamicStringBuilder(uint32_t expected_num_strings) {
+  explicit DynamicStringBuilder(uint32_t expected_num_strings) {
     m_strings.reserve(expected_num_strings);
   }
 
   // Take ownership of s
   DynamicStringBuilder& operator<<(std::string&& s) {
     m_total_chars += s.size();
-    m_strings.push_back(s);
+    m_strings.push_back(std::move(s));
     return *this;
   }
 

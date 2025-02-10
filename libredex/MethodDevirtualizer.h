@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
@@ -12,22 +10,27 @@
 #include "Pass.h"
 
 struct DevirtualizerConfigs {
+  DevirtualizerConfigs(bool vmethods_not_using_this,
+                       bool vmethods_using_this,
+                       bool dmethods_not_using_this,
+                       bool dmethods_using_this,
+                       bool ignore_keep,
+                       const std::unordered_set<DexType*>& do_not_devirt_anno)
+      : vmethods_not_using_this(vmethods_not_using_this),
+        vmethods_using_this(vmethods_using_this),
+        dmethods_not_using_this(dmethods_not_using_this),
+        dmethods_using_this(dmethods_using_this),
+        ignore_keep(ignore_keep),
+        do_not_devirt_anno(do_not_devirt_anno)
+
+  {}
+
   bool vmethods_not_using_this = true;
   bool vmethods_using_this = false;
   bool dmethods_not_using_this = true;
   bool dmethods_using_this = false;
   bool ignore_keep = false;
-
-  DevirtualizerConfigs(bool vmethods_not_using_this = true,
-                       bool vmethods_using_this = false,
-                       bool dmethods_not_using_this = true,
-                       bool dmethods_using_this = false,
-                       bool ignore_keep = false)
-      : vmethods_not_using_this(vmethods_not_using_this),
-        vmethods_using_this(vmethods_using_this),
-        dmethods_not_using_this(dmethods_not_using_this),
-        dmethods_using_this(dmethods_using_this),
-        ignore_keep(ignore_keep) {}
+  const std::unordered_set<DexType*>& do_not_devirt_anno;
 };
 
 struct DevirtualizerMetrics {
@@ -46,13 +49,15 @@ class MethodDevirtualizer {
                       bool vmethods_using_this,
                       bool dmethods_not_using_this,
                       bool dmethods_using_this,
-                      bool ignore_keep) {
-    m_config = {vmethods_not_using_this,
-                vmethods_using_this,
-                dmethods_not_using_this,
-                dmethods_using_this,
-                ignore_keep};
-  }
+                      bool ignore_keep,
+                      const std::unordered_set<DexType*>& do_not_devirt_anno)
+
+      : m_config(vmethods_not_using_this,
+                 vmethods_using_this,
+                 dmethods_not_using_this,
+                 dmethods_using_this,
+                 ignore_keep,
+                 do_not_devirt_anno) {}
 
   DevirtualizerMetrics devirtualize_methods(const Scope& scope) {
     return devirtualize_methods(scope, scope);
@@ -60,10 +65,6 @@ class MethodDevirtualizer {
 
   DevirtualizerMetrics devirtualize_methods(
       const Scope& scope, const std::vector<DexClass*>& target_classes);
-
-  // Assuming vmethods.
-  DevirtualizerMetrics devirtualize_vmethods(
-      const Scope& scope, const std::vector<DexMethod*>& methods);
 
  private:
   DevirtualizerConfigs m_config;

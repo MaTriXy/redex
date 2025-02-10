@@ -1,21 +1,39 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include "PassManager.h"
+#include "Pass.h"
 
 class ObfuscatePass : public Pass {
  public:
   ObfuscatePass() : Pass("ObfuscatePass") {}
 
-  virtual void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
+  redex_properties::PropertyInteractions get_property_interactions()
+      const override {
+    using namespace redex_properties::interactions;
+    using namespace redex_properties::names;
+    return {
+        {DexLimitsObeyed, Preserves},
+        {NoResolvablePureRefs, Preserves},
+        {InitialRenameClass, Preserves},
+    };
+  }
+
+  void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
+
+  void bind_config() final { trait(Traits::Pass::unique, true); }
+
+  struct Config {
+    bool avoid_colliding_debug_name{false};
+  };
+
+ private:
+  Config m_config;
 };
 
 struct RenameStats {
@@ -25,6 +43,9 @@ struct RenameStats {
   size_t dmethods_renamed = 0;
   size_t vmethods_total = 0;
   size_t vmethods_renamed = 0;
+  size_t classes_made_public{0};
 };
 
-void obfuscate(Scope& classes, RenameStats& stats);
+void obfuscate(Scope& classes,
+               RenameStats& stats,
+               const ObfuscatePass::Config& config);

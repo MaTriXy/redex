@@ -1,19 +1,19 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
-#include "ConstantPropagation.h"
+#include "ConstantPropagationPass.h"
 
 #include <gtest/gtest.h>
 
 #include "AbstractDomainPropertyTest.h"
 #include "ConstantPropagationTestUtil.h"
 #include "IRAssembler.h"
+#include "RedexTest.h"
+#include "SignedConstantDomain.h"
 
 struct Constants {
   SignedConstantDomain one{SignedConstantDomain(1)};
@@ -33,6 +33,9 @@ struct Constants {
 
   SignedConstantDomain negative{
       SignedConstantDomain(sign_domain::Interval::LTZ)};
+
+  SignedConstantDomain not_zero{
+      SignedConstantDomain(sign_domain::Interval::NEZ)};
 };
 
 INSTANTIATE_TYPED_TEST_CASE_P(SignedConstantDomain,
@@ -43,9 +46,9 @@ template <>
 std::vector<SignedConstantDomain>
 AbstractDomainPropertyTest<SignedConstantDomain>::non_extremal_values() {
   Constants constants;
-  return {constants.one,     constants.minus_one, constants.zero,
-          constants.max_val, constants.min_val,   constants.positive,
-          constants.negative};
+  return {constants.one,      constants.minus_one, constants.zero,
+          constants.max_val,  constants.min_val,   constants.positive,
+          constants.negative, constants.not_zero};
 }
 
 class SignedConstantDomainOperationsTest : public testing::Test,
@@ -60,27 +63,54 @@ TEST_F(SignedConstantDomainOperationsTest, intervals) {
   EXPECT_EQ(SignedConstantDomain(Interval::EQZ), zero);
   EXPECT_EQ(max_val.interval(), Interval::GTZ);
   EXPECT_EQ(min_val.interval(), Interval::LTZ);
+  EXPECT_EQ(not_zero.interval(), Interval::NEZ);
 
-  EXPECT_EQ(one.join(minus_one).interval(), Interval::ALL);
+  EXPECT_EQ(one.join(minus_one).interval(), Interval::NEZ);
   EXPECT_EQ(one.join(zero).interval(), Interval::GEZ);
   EXPECT_EQ(minus_one.join(zero).interval(), Interval::LEZ);
   EXPECT_EQ(max_val.join(zero).interval(), Interval::GEZ);
   EXPECT_EQ(min_val.join(zero).interval(), Interval::LEZ);
+  EXPECT_EQ(min_val.join(max_val).interval(), Interval::NEZ);
+}
+
+TEST_F(SignedConstantDomainOperationsTest, numeric_intervals) {
+  using namespace sign_domain;
+
+  EXPECT_EQ(one.numeric_interval_domain(), NumericIntervalDomain::finite(1, 1));
+  EXPECT_EQ(minus_one.numeric_interval_domain(),
+            NumericIntervalDomain::finite(-1, -1));
+  EXPECT_EQ(zero.numeric_interval_domain(),
+            NumericIntervalDomain::finite(0, 0));
+  EXPECT_EQ(NumericIntervalDomain::finite(0, 0),
+            zero.numeric_interval_domain());
+  EXPECT_EQ(max_val.numeric_interval_domain(), NumericIntervalDomain::high());
+  EXPECT_EQ(min_val.numeric_interval_domain(), NumericIntervalDomain::low());
+  EXPECT_EQ(not_zero.numeric_interval_domain(), NumericIntervalDomain::top());
+
+  EXPECT_EQ(one.join(minus_one).numeric_interval_domain(),
+            NumericIntervalDomain::finite(-1, 1));
+  EXPECT_EQ(one.join(zero).numeric_interval_domain(),
+            NumericIntervalDomain::finite(0, 1));
+  EXPECT_EQ(minus_one.join(zero).numeric_interval_domain(),
+            NumericIntervalDomain::finite(-1, 0));
+  EXPECT_EQ(max_val.join(zero).numeric_interval_domain(),
+            NumericIntervalDomain::bounded_below(0));
+  EXPECT_EQ(min_val.join(zero).numeric_interval_domain(),
+            NumericIntervalDomain::bounded_above(0));
+  EXPECT_EQ(min_val.join(max_val).numeric_interval_domain(),
+            NumericIntervalDomain::top());
 }
 
 TEST_F(SignedConstantDomainOperationsTest, binaryOperations) {
   using namespace sign_domain;
 
   EXPECT_EQ(one.join(positive), positive);
-  EXPECT_TRUE(one.join(negative).is_top());
   EXPECT_EQ(max_val.join(positive), positive);
-  EXPECT_TRUE(max_val.join(negative).is_top());
   EXPECT_EQ(minus_one.join(negative), negative);
-  EXPECT_TRUE(minus_one.join(positive).is_top());
   EXPECT_EQ(min_val.join(negative), negative);
-  EXPECT_TRUE(min_val.join(positive).is_top());
   EXPECT_EQ(zero.join(positive).interval(), Interval::GEZ);
   EXPECT_EQ(zero.join(negative).interval(), Interval::LEZ);
+  EXPECT_EQ(zero.join(not_zero).interval(), Interval::ALL);
 
   EXPECT_EQ(one.meet(positive), one);
   EXPECT_TRUE(one.meet(negative).is_bottom());
@@ -90,9 +120,158 @@ TEST_F(SignedConstantDomainOperationsTest, binaryOperations) {
   EXPECT_TRUE(minus_one.meet(positive).is_bottom());
   EXPECT_EQ(min_val.meet(negative), min_val);
   EXPECT_TRUE(min_val.meet(positive).is_bottom());
+  EXPECT_TRUE(zero.meet(not_zero).is_bottom());
+  EXPECT_EQ(not_zero.meet(positive), positive);
+  EXPECT_EQ(not_zero.meet(max_val), max_val);
+  EXPECT_EQ(not_zero.meet(min_val), min_val);
 }
 
-TEST(ConstantPropagation, IfToGoto) {
+class ConstantNezTest : public RedexTest {};
+
+TEST_F(ConstantNezTest, DeterminableNezTrue) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (new-instance "LFoo;")
+     (move-result-pseudo-object v0)
+     (invoke-direct (v0) "LFoo;.<init>:()V")
+
+     (if-nez v0 :if-true-label)
+     (const v0 1)
+
+     (:if-true-label)
+     (const v0 2)
+
+     (return-void)
+    )
+)");
+  do_const_prop(code.get());
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (new-instance "LFoo;")
+     (move-result-pseudo-object v0)
+     (invoke-direct (v0) "LFoo;.<init>:()V")
+
+     (const v0 2)
+
+     (return-void)
+    )
+)");
+
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantNezTest, DeterminableNezFalse) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (new-instance "LFoo;")
+     (move-result-pseudo-object v0)
+     (const v0 0)
+
+     (if-nez v0 :if-true-label)
+     (const v0 1)
+
+     (:if-true-label)
+     (const v0 2)
+
+     (return-void)
+    )
+)");
+  do_const_prop(code.get());
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (new-instance "LFoo;")
+     (move-result-pseudo-object v0)
+     (const v0 0)
+
+     (const v0 1)
+
+     (:if-true-label)
+     (const v0 2)
+
+     (return-void)
+    )
+)");
+
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantNezTest, DeterminableEZFalse) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (new-instance "LFoo;")
+     (move-result-pseudo-object v0)
+
+     (if-eqz v0 :if-true-label)
+     (const v0 1)
+
+     (:if-true-label)
+     (const v0 2)
+
+     (return-void)
+    )
+)");
+  do_const_prop(code.get());
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (new-instance "LFoo;")
+     (move-result-pseudo-object v0)
+
+     (const v0 1)
+
+     (const v0 2)
+
+     (return-void)
+    )
+)");
+
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantNezTest, NonDeterminableNEZ) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (new-instance "LFoo;")
+     (move-result-pseudo-object v0)
+     (invoke-direct (v0) "LFoo;.<init>:()V")
+     (iget v0 "LBoo;.a:I")
+     (move-result-pseudo v0)
+
+     (if-nez v0 :if-true-label)
+     (const v0 1)
+
+     (:if-true-label)
+     (const v0 2)
+
+     (return-void)
+    )
+)");
+  do_const_prop(code.get());
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (new-instance "LFoo;")
+     (move-result-pseudo-object v0)
+     (invoke-direct (v0) "LFoo;.<init>:()V")
+     (iget v0 "LBoo;.a:I")
+     (move-result-pseudo v0)
+
+     (if-nez v0 :if-true-label)
+     (const v0 1)
+
+     (:if-true-label)
+     (const v0 2)
+
+     (return-void)
+    )
+)");
+
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, IfToGoto) {
   auto code = assembler::ircode_from_string(R"(
     (
      (const v0 0)
@@ -102,6 +281,8 @@ TEST(ConstantPropagation, IfToGoto) {
 
      (:if-true-label)
      (const v0 2)
+
+     (return-void)
     )
 )");
 
@@ -111,26 +292,23 @@ TEST(ConstantPropagation, IfToGoto) {
     (
      (const v0 0)
 
-     (goto :if-true-label)
-     (const v0 1)
-
-     (:if-true-label)
      (const v0 2)
+
+     (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
-TEST(ConstantPropagation, FoldArithmeticAddLit) {
+TEST_F(ConstantPropagationTest, FoldArithmeticAddLit) {
   auto code = assembler::ircode_from_string(R"(
     (
      (const v0 2147483646)
-     (add-int/lit8 v0 v0 1) ; this should be converted to a const opcode
+     (add-int/lit v0 v0 1) ; this should be converted to a const opcode
      (const v1 2147483647)
      (if-eq v0 v1 :end)
      (const v0 2147483647)
-     (add-int/lit8 v0 v0 1) ; we don't handle overflows, so this should be
+     (add-int/lit v0 v0 1) ; we don't handle overflows, so this should be
                             ; unchanged
      (:end)
      (return-void)
@@ -144,18 +322,13 @@ TEST(ConstantPropagation, FoldArithmeticAddLit) {
      (const v0 2147483646)
      (const v0 2147483647)
      (const v1 2147483647)
-     (goto :end)
-     (const v0 2147483647)
-     (add-int/lit8 v0 v0 1)
-     (:end)
      (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
-TEST(ConstantPropagation, AnalyzeCmp) {
+TEST_F(ConstantPropagationTest, AnalyzeCmp) {
   auto code = assembler::ircode_from_string(R"(
     (
       (load-param v0)
@@ -201,14 +374,9 @@ TEST(ConstantPropagation, AnalyzeCmp) {
       (const-wide v1 1)
       (cmp-long v2 v0 v1)
       (const v3 -1)
-      (goto :end)
 
-      (:b1)
-      (const-wide v0 1)
-      (const-wide v1 1)
-      (cmp-long v2 v0 v1)
-      (const v3 0)
-      (goto :end)
+      (:end)
+      (return v2)
 
       (:b2)
       (const-wide v0 1)
@@ -217,15 +385,18 @@ TEST(ConstantPropagation, AnalyzeCmp) {
       (const v3 1)
       (goto :end)
 
-      (:end)
-      (return v2)
+      (:b1)
+      (const-wide v0 1)
+      (const-wide v1 1)
+      (cmp-long v2 v0 v1)
+      (const v3 0)
+      (goto :end)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
-TEST(ConstantPropagation, ConditionalConstant_EqualsAlwaysTrue) {
+TEST_F(ConstantPropagationTest, ConditionalConstant_EqualsAlwaysTrue) {
   auto code = assembler::ircode_from_string(R"(
     (
      (const v0 0)
@@ -250,22 +421,13 @@ TEST(ConstantPropagation, ConditionalConstant_EqualsAlwaysTrue) {
      (const v0 0)
      (const v1 0)
 
-     (goto :if-true-label-1)
-     (const v1 1)
-
-     (:if-true-label-1)
-     (goto :if-true-label-2)
-     (const v1 2)
-
-     (:if-true-label-2)
      (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
-TEST(ConstantPropagation, ConditionalConstant_EqualsAlwaysFalse) {
+TEST_F(ConstantPropagationTest, ConditionalConstant_EqualsAlwaysFalse) {
   auto code = assembler::ircode_from_string(R"(
     (
      (const v0 1)
@@ -292,18 +454,13 @@ TEST(ConstantPropagation, ConditionalConstant_EqualsAlwaysFalse) {
 
      (const v1 0)
 
-     (goto :if-true-label-2)
-     (const v1 2)
-
-     (:if-true-label-2)
      (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
-TEST(ConstantPropagation, ConditionalConstant_LessThanAlwaysTrue) {
+TEST_F(ConstantPropagationTest, ConditionalConstant_LessThanAlwaysTrue) {
   auto code = assembler::ircode_from_string(R"(
     (
      (const v0 0)
@@ -328,20 +485,15 @@ TEST(ConstantPropagation, ConditionalConstant_LessThanAlwaysTrue) {
      (const v0 0)
      (const v1 1)
 
-     (goto :if-true-label-1)
-     (const v1 0)
-
-     (:if-true-label-1)
      (const v1 2)
 
      (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
-TEST(ConstantPropagation, ConditionalConstant_LessThanAlwaysFalse) {
+TEST_F(ConstantPropagationTest, ConditionalConstant_LessThanAlwaysFalse) {
   auto code = assembler::ircode_from_string(R"(
     (
      (const v0 1)
@@ -368,18 +520,13 @@ TEST(ConstantPropagation, ConditionalConstant_LessThanAlwaysFalse) {
 
      (const v0 0)
 
-     (goto :if-true-label-2)
-     (const v1 2)
-
-     (:if-true-label-2)
      (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
-TEST(ConstantPropagation, ConditionalConstantInferZero) {
+TEST_F(ConstantPropagationTest, ConditionalConstantInferZero) {
   auto code = assembler::ircode_from_string(R"(
     (
      (load-param v0) ; some unknown value
@@ -401,19 +548,15 @@ TEST(ConstantPropagation, ConditionalConstantInferZero) {
      (load-param v0)
 
      (if-nez v0 :exit)
-     (goto :exit)
-
-     (const v0 1)
 
      (:exit)
      (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
-TEST(ConstantPropagation, ConditionalConstantInferInterval) {
+TEST_F(ConstantPropagationTest, ConditionalConstantInferInterval) {
   auto code = assembler::ircode_from_string(R"(
     (
      (load-param v0) ; some unknown value
@@ -435,14 +578,330 @@ TEST(ConstantPropagation, ConditionalConstantInferInterval) {
      (load-param v0)
 
      (if-lez v0 :exit)
-     (goto :exit)
-
-     (const v0 1)
 
      (:exit)
      (return-void)
     )
 )");
-  EXPECT_EQ(assembler::to_s_expr(code.get()),
-            assembler::to_s_expr(expected_code.get()));
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, ConditionalConstantCompareIntervals) {
+  auto code = assembler::ircode_from_string(R"( (
+       (load-param v0)
+       (load-param v1)
+
+       (if-gtz v0 :if-gtz-label)
+       ; here v0 is <= 0
+       (if-ltz v1 :if-ltz-label)
+       ; here v1 is >= 0
+       (if-le v0 v1 :exit)
+
+       (const v3 0)
+       (:if-gtz-label)
+       (const v4 0)
+       (:if-ltz-label)
+       (const v5 0)
+       (:exit)
+       (return-void)
+      )
+  )");
+  do_const_prop(code.get());
+
+  auto expected_code = assembler::ircode_from_string(R"( (
+       (load-param v0)
+       (load-param v1)
+
+       (if-gtz v0 :if-gtz-label)
+       ; here v0 is <= 0
+       (if-ltz v1 :if-ltz-label)
+       ; here v1 is >= 0
+
+       (:exit)
+       (return-void)
+
+       (:if-gtz-label)
+       (const v4 0)
+       (:if-ltz-label)
+       (const v5 0)
+       (goto :exit)
+      )
+  )");
+
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// This test catches the regression described in D8676637.
+TEST_F(ConstantPropagationTest, MayMustCompare) {
+  {
+    auto code = assembler::ircode_from_string(R"( (
+       (load-param v0)
+       (load-param v1)
+
+       (if-gtz v0 :if-gtz-label)
+       ; here v0 is <= 0
+       (if-ltz v1 :if-ltz-label)
+       ; here v1 is >= 0
+
+       (const v2 0)
+       ; v0 < v1 may not be true since v0 == v1 is possible
+       (if-lt v0 v1 :if-lt-label)
+       (const v3 0)
+       (:if-gtz-label)
+       (const v4 0)
+       (:if-ltz-label)
+       (const v5 0)
+       (:if-lt-label)
+       (return-void)
+      )
+  )");
+    auto expected = assembler::to_s_expr(code.get());
+    do_const_prop(code.get());
+    EXPECT_EQ(assembler::to_s_expr(code.get()), expected);
+  }
+
+  {
+    auto code = assembler::ircode_from_string(R"( (
+       (load-param v0)
+       (load-param v1)
+
+       (if-gtz v0 :if-gtz-label)
+       ; here v0 is <= 0
+       (if-ltz v1 :if-ltz-label)
+       ; here v1 is >= 0
+
+       (const v2 0)
+       ; v1 > v0 may not be true since v0 == v1 is possible
+       (if-gt v1 v0 :if-gt-label)
+       (const v3 0)
+       (:if-gtz-label)
+       (const v4 0)
+       (:if-ltz-label)
+       (const v5 0)
+       (:if-gt-label)
+       (return-void)
+      )
+  )");
+    auto expected = assembler::to_s_expr(code.get());
+    do_const_prop(code.get());
+    EXPECT_EQ(assembler::to_s_expr(code.get()), expected);
+  }
+}
+
+TEST_F(ConstantPropagationTest, FoldBitwiseAndLit) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 1023)
+      (and-int/lit v0 v0 511)
+      (and-int/lit v0 v0 255)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 1023)
+      (const v0 511)
+      (const v0 255)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldBitwiseOrLit) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 257)
+      (or-int/lit v0 v0 255)
+      (or-int/lit v0 v0 1024)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 257)
+      (const v0 511)
+      (const v0 1535)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldBitwiseXorLit) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 1023)
+      (xor-int/lit v0 v0 512)
+      (xor-int/lit v0 v0 255)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 1023)
+      (const v0 511)
+      (const v0 256)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldBitwiseShiftLeftOverflowLit) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 -16776961)
+      (shl-int/lit v0 v0 8)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 -16776961)
+      (const v0 65280)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldBitwiseShiftLit) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 1023)
+      (shr-int/lit v0 v0 2)
+      (shl-int/lit v0 v0 1)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 1023)
+      (const v0 255)
+      (const v0 510)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldBitwiseOverShiftLit) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 1023)
+      (shr-int/lit v0 v0 34)
+      (shl-int/lit v0 v0 33)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 1023)
+      (const v0 255)
+      (const v0 510)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldBitwiseArithAndLogicalRightShiftLit) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 -1024)
+      (shr-int/lit v0 v0 2)
+      (ushr-int/lit v0 v0 12)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 -1024)
+      (const v0 -256)
+      (const v0 1048575)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldDivIntLit) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 4096)
+      (div-int/lit v0 512)
+      (move-result-pseudo v1)
+      (const v0 15)
+      (div-int/lit v0 2)
+      (move-result-pseudo v1)
+      (div-int/lit v0 0)
+      (move-result-pseudo v2)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 4096)
+      (const v1 8)
+      (const v0 15)
+      (const v1 7)
+      (div-int/lit v0 0)
+      (move-result-pseudo v2)
+      (return-void)
+    )
+  )"); // division by 0 should not be optimized out
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, NeAtBoundaryOfNez) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (load-param v0) ; some unknown value
+
+     (const v1 -1)
+     (const v2 1)
+     (if-lt v0 v1 :exit)
+     (if-gt v0 v2 :exit)
+     (if-eqz v0 :exit)
+     ; we now know that v0 is either -1 or +1, but not 0
+
+     (if-eq v0 v1 :exit)
+     ; we now know that v0 is +1
+
+     (if-nez v0 :exit) ; must happen
+
+     (const v0 42) ; infeasible
+
+     (:exit)
+     (return v0)
+    )
+)");
+
+  do_const_prop(code.get());
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+     (load-param v0)
+
+     (const v1 -1)
+     (const v2 1)
+     (if-lt v0 v1 :exit)
+     (if-gt v0 v2 :exit)
+     (if-eqz v0 :exit)
+     (if-eq v0 v1 :exit)
+
+     (:exit)
+     (return v0)
+    )
+)");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }

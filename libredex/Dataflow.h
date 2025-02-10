@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "ControlFlow.h"
@@ -45,8 +43,7 @@ std::unique_ptr<std::unordered_map<IRInstruction*, T>> forwards_dataflow(
     }
   }
 
-  auto insn_in_map =
-      std::make_unique<std::unordered_map<IRInstruction*, T>>();
+  auto insn_in_map = std::make_unique<std::unordered_map<IRInstruction*, T>>();
   for (const auto& block : blocks) {
     auto insn_in = bottom;
     if (block->id() == 0) {

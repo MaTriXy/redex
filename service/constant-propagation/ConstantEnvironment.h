@@ -1,27 +1,31 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
 #include <limits>
+#include <utility>
 
-#include "ConstantAbstractDomain.h"
+#include <sparta/ConstantAbstractDomain.h>
+#include <sparta/DisjointUnionAbstractDomain.h>
+#include <sparta/HashedAbstractPartition.h>
+#include <sparta/HashedSetAbstractDomain.h>
+#include <sparta/PatriciaTreeMapAbstractEnvironment.h>
+#include <sparta/PatriciaTreeSetAbstractDomain.h>
+#include <sparta/ReducedProductAbstractDomain.h>
+
 #include "ConstantArrayDomain.h"
 #include "ControlFlow.h"
-#include "DisjointUnionAbstractDomain.h"
-#include "FixpointIterators.h"
-#include "HashedAbstractPartition.h"
+#include "DisjointUnionWithSignedConstantDomain.h"
+#include "NewObjectDomain.h"
 #include "ObjectDomain.h"
-#include "PatriciaTreeMapAbstractEnvironment.h"
-#include "PatriciaTreeSetAbstractDomain.h"
-#include "ReducedProductAbstractDomain.h"
+#include "ObjectWithImmutAttr.h"
 #include "SignedConstantDomain.h"
+#include "SingletonObject.h"
 
 /*
  * The definitions in this file serve to abstractly model:
@@ -30,68 +34,102 @@
  *   - Constant primitive values stored in fields
  */
 
-using reg_t = uint32_t;
-
-constexpr reg_t RESULT_REGISTER = std::numeric_limits<reg_t>::max();
-
 /*****************************************************************************
  * Abstract stack / environment values.
  *****************************************************************************/
 
-/*
- * This represents an object that is uniquely referenced by a single static
- * field. This enables us to compare these objects easily -- we can determine
- * whether two different SingletonObjectDomain elements are equal just based
- * on their representation in the abstract environment, without needing to
- * check if they are pointing to the same object in the abstract heap.
- */
-using SingletonObjectDomain = ConstantAbstractDomain<const DexField*>;
+using IntegerSetDomain = sparta::HashedSetAbstractDomain<int64_t>;
 
-using StringSetDomain = PatriciaTreeSetAbstractDomain<const DexString*>;
+using StringSetDomain = sparta::PatriciaTreeSetAbstractDomain<const DexString*>;
+
+using StringDomain = sparta::ConstantAbstractDomain<const DexString*>;
+
+using ConstantClassObjectDomain =
+    sparta::ConstantAbstractDomain<const DexType*>;
+
+using ConstantInjectionIdDomain = sparta::ConstantAbstractDomain<int32_t>;
 
 /*
  * This represents a new-instance or new-array instruction.
  */
-using AbstractHeapPointer = ConstantAbstractDomain<const IRInstruction*>;
+using AbstractHeapPointer =
+    sparta::ConstantAbstractDomain<const IRInstruction*>;
+
+/*
+ * Identifies domains whose members are compatible with NEZ.
+ */
+class is_object_visitor : public boost::static_visitor<bool> {
+ public:
+  bool operator()(const SingletonObjectDomain&) const { return true; }
+
+  bool operator()(const StringDomain&) const { return true; }
+
+  bool operator()(const ConstantClassObjectDomain&) const { return true; }
+
+  bool operator()(const ObjectWithImmutAttrDomain&) const { return true; }
+
+  bool operator()(const AbstractHeapPointer&) const { return true; }
+
+  bool operator()(const NewObjectDomain&) const { return true; }
+
+  template <typename Domain>
+  bool operator()(const Domain&) const {
+    return false;
+  }
+};
 
 // TODO: Refactor so that we don't have to list every single possible
 // sub-Domain here.
-using ConstantValue = DisjointUnionAbstractDomain<SignedConstantDomain,
-                                                  SingletonObjectDomain,
-                                                  StringSetDomain,
-                                                  AbstractHeapPointer>;
+using ConstantValue =
+    DisjointUnionWithSignedConstantDomain<is_object_visitor,
+                                          SingletonObjectDomain,
+                                          IntegerSetDomain,
+                                          StringSetDomain,
+                                          StringDomain,
+                                          ConstantClassObjectDomain,
+                                          ConstantInjectionIdDomain,
+                                          ObjectWithImmutAttrDomain,
+                                          NewObjectDomain,
+                                          AbstractHeapPointer>;
 
-// For storing non-escaping static fields.
-using StaticFieldEnvironment =
-    PatriciaTreeMapAbstractEnvironment<const DexField*, ConstantValue>;
+struct ConstantValueDefaultValue {
+  ConstantValue operator()() { return SignedConstantDomain(0); }
+};
+
+// For storing non-escaping static and instance fields.
+using FieldEnvironment =
+    sparta::PatriciaTreeMapAbstractEnvironment<const DexField*, ConstantValue>;
 
 using ConstantRegisterEnvironment =
-    PatriciaTreeMapAbstractEnvironment<reg_t, ConstantValue>;
+    sparta::PatriciaTreeMapAbstractEnvironment<reg_t, ConstantValue>;
 
 /*****************************************************************************
  * Heap values.
+ * ConstantPropagationPass and IPCP do not support heap stores properly. Use
+ * LocalPointersAnalysis for local mutable objects analysis.
  *****************************************************************************/
 
-using ConstantPrimitiveArrayDomain = ConstantArrayDomain<SignedConstantDomain>;
+using ConstantValueArrayDomain =
+    ConstantArrayDomain<ConstantValue, ConstantValueDefaultValue>;
 
 using ConstantObjectDomain = ObjectDomain<ConstantValue>;
 
-using HeapValue = DisjointUnionAbstractDomain<ConstantPrimitiveArrayDomain,
-                                              ConstantObjectDomain>;
+using HeapValue = sparta::DisjointUnionAbstractDomain<ConstantValueArrayDomain,
+                                                      ConstantObjectDomain>;
 
-using ConstantHeap =
-    PatriciaTreeMapAbstractEnvironment<AbstractHeapPointer::ConstantType,
-                                       HeapValue>;
+using ConstantHeap = sparta::PatriciaTreeMapAbstractEnvironment<
+    AbstractHeapPointer::ConstantType,
+    HeapValue>;
 
 /*****************************************************************************
  * Combined model of the abstract stack and heap.
  *****************************************************************************/
 
 class ConstantEnvironment final
-    : public ReducedProductAbstractDomain<ConstantEnvironment,
-                                          ConstantRegisterEnvironment,
-                                          StaticFieldEnvironment,
-                                          ConstantHeap> {
+    : public sparta::ReducedProductAbstractDomain<ConstantEnvironment,
+                                                  ConstantRegisterEnvironment,
+                                                  FieldEnvironment,
+                                                  ConstantHeap> {
  public:
   using ReducedProductAbstractDomain::ReducedProductAbstractDomain;
 
@@ -104,11 +142,11 @@ class ConstantEnvironment final
   ConstantEnvironment(std::initializer_list<std::pair<reg_t, ConstantValue>> l)
       : ReducedProductAbstractDomain(
             std::make_tuple(ConstantRegisterEnvironment(l),
-                            StaticFieldEnvironment(),
+                            FieldEnvironment(),
                             ConstantHeap())) {}
 
   static void reduce_product(std::tuple<ConstantRegisterEnvironment,
-                                        StaticFieldEnvironment,
+                                        FieldEnvironment,
                                         ConstantHeap>&) {}
   /*
    * Getters and setters
@@ -118,7 +156,7 @@ class ConstantEnvironment final
     return ReducedProductAbstractDomain::get<0>();
   }
 
-  const StaticFieldEnvironment& get_field_environment() const {
+  const FieldEnvironment& get_field_environment() const {
     return ReducedProductAbstractDomain::get<1>();
   }
 
@@ -170,18 +208,18 @@ class ConstantEnvironment final
 
   ConstantEnvironment& mutate_register_environment(
       std::function<void(ConstantRegisterEnvironment*)> f) {
-    apply<0>(f);
+    apply<0>(std::move(f));
     return *this;
   }
 
   ConstantEnvironment& mutate_field_environment(
-      std::function<void(StaticFieldEnvironment*)> f) {
-    apply<1>(f);
+      std::function<void(FieldEnvironment*)> f) {
+    apply<1>(std::move(f));
     return *this;
   }
 
   ConstantEnvironment& mutate_heap(std::function<void(ConstantHeap*)> f) {
-    apply<2>(f);
+    apply<2>(std::move(f));
     return *this;
   }
 
@@ -192,7 +230,7 @@ class ConstantEnvironment final
 
   ConstantEnvironment& set(const DexField* field, const ConstantValue& value) {
     return mutate_field_environment(
-        [&](StaticFieldEnvironment* env) { env->set(field, value); });
+        [&](FieldEnvironment* env) { env->set(field, value); });
   }
 
   /*
@@ -213,14 +251,14 @@ class ConstantEnvironment final
    */
   ConstantEnvironment& set_array_binding(reg_t reg,
                                          uint32_t idx,
-                                         const SignedConstantDomain& value) {
+                                         const ConstantValue& value) {
     return mutate_heap([&](ConstantHeap* heap) {
       auto ptr = get<AbstractHeapPointer>(reg);
       if (!ptr.is_value()) {
         return;
       }
       heap->update(*ptr.get_constant(), [&](const HeapValue& arr) {
-        auto copy = arr.get<ConstantPrimitiveArrayDomain>();
+        auto copy = arr.get<ConstantValueArrayDomain>();
         copy.set(idx, value);
         return copy;
       });
@@ -245,16 +283,17 @@ class ConstantEnvironment final
 
   ConstantEnvironment& clear_field_environment() {
     return mutate_field_environment(
-        [](StaticFieldEnvironment* env) { env->set_to_top(); });
+        [](FieldEnvironment* env) { env->set_to_top(); });
   }
 };
 
 /*
  * For modeling the stack + heap at method return statements.
  */
-class ReturnState : public ReducedProductAbstractDomain<ReturnState,
-                                                        ConstantValue,
-                                                        ConstantHeap> {
+class ReturnState final
+    : public sparta::ReducedProductAbstractDomain<ReturnState,
+                                                  ConstantValue,
+                                                  ConstantHeap> {
  public:
   using ReducedProductAbstractDomain::ReducedProductAbstractDomain;
 

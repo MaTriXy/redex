@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "DexOpcode.h"
@@ -14,6 +12,7 @@
 
 namespace dex_opcode {
 
+// clang-format off
 OpcodeFormat format(DexOpcode opcode) {
   switch (opcode) {
 #define OP(op, code, fmt, ...) \
@@ -21,25 +20,22 @@ OpcodeFormat format(DexOpcode opcode) {
     return FMT_##fmt;
     DOPS
 #undef OP
-  case FOPCODE_PACKED_SWITCH :
-    return FMT_fopcode;
+  case FOPCODE_PACKED_SWITCH : return FMT_fopcode;
   case FOPCODE_SPARSE_SWITCH:
     return FMT_fopcode;
   case FOPCODE_FILLED_ARRAY:
     return FMT_fopcode;
 #define OP(op, code, fmt, ...) \
   case code:                   \
-    always_assert_log(false, "Unexpected quick opcode 0x%x", opcode);
-    break;
+    not_reached_log("Unexpected quick opcode 0x%x", opcode);
     QDOPS
 #undef OP
   }
-  always_assert_log(false, "Unexpected opcode 0x%x", opcode);
+  not_reached_log("Unexpected opcode 0x%x", opcode);
 }
+// clang-format on
 
-bool dest_is_src(DexOpcode op) {
-  return format(op) == FMT_f12x_2;
-}
+bool dest_is_src(DexOpcode op) { return format(op) == FMT_f12x_2; }
 
 bool has_literal(DexOpcode op) {
   auto fmt = format(op);
@@ -75,9 +71,7 @@ bool has_offset(DexOpcode op) {
 
 bool has_range(DexOpcode op) {
   auto fmt = format(op);
-  if (fmt == FMT_f3rc || fmt == FMT_f5rc)
-    return true;
-  return false;
+  return fmt == FMT_f3rc || fmt == FMT_f5rc;
 }
 
 bool is_commutative(DexOpcode op) {
@@ -145,6 +139,10 @@ bool is_goto(DexOpcode op) {
   }
 }
 
+bool is_move(DexOpcode op) {
+  return op >= DOPCODE_MOVE && op <= DOPCODE_MOVE_OBJECT_16;
+}
+
 DexOpcode invert_conditional_branch(DexOpcode op) {
   switch (op) {
   case DOPCODE_IF_EQ:
@@ -172,111 +170,219 @@ DexOpcode invert_conditional_branch(DexOpcode op) {
   case DOPCODE_IF_LEZ:
     return DOPCODE_IF_GTZ;
   default:
-    always_assert_log(false, "Invalid conditional opcode %s", SHOW(op));
+    not_reached_log("Invalid conditional opcode %s", SHOW(op));
   }
 }
 
 bit_width_t src_bit_width(DexOpcode op, uint16_t i) {
   switch (dex_opcode::format(op)) {
-  case FMT_f00x:    assert(false);
-  case FMT_f10x:    assert(false);
-  case FMT_f12x:    assert(i == 0); return 4;
-  case FMT_f12x_2:  assert(i <= 1); return 4;
-  case FMT_f11n:    assert(false);
-  case FMT_f11x_d:  assert(false);
-  case FMT_f11x_s:  assert(i == 0); return 8;
-  case FMT_f10t:    assert(false);
-  case FMT_f20t:    assert(false);
-  case FMT_f20bc:   assert(false);
-  case FMT_f22x:    assert(i == 0); return 16;
-  case FMT_f21t:    assert(i == 0); return 8;
-  case FMT_f21s:    assert(false);
-  case FMT_f21h:    assert(false);
-  case FMT_f21c_d:  assert(false);
-  case FMT_f21c_s:  assert(i == 0); return 8;
-  case FMT_f23x_d:  assert(i <= 1); return 8;
-  case FMT_f23x_s:  assert(i <= 2); return 8;
-  case FMT_f22b:    assert(i == 0); return 8;
-  case FMT_f22t:    assert(i <= 1); return 4;
-  case FMT_f22s:    assert(i == 0); return 4;
-  case FMT_f22c_d:  assert(i == 0); return 4;
-  case FMT_f22c_s:  assert(i <= 1); return 4;
-  case FMT_f22cs:   assert(false);
-  case FMT_f30t:    assert(false);
-  case FMT_f32x:    assert(i == 0); return 16;
-  case FMT_f31i:    assert(false);
-  case FMT_f31t:    assert(i == 0); return 8;
-  case FMT_f31c:    assert(false);
-  case FMT_f35c:    assert(i <= 4); return 4;
-  case FMT_f3rc:    assert(i == 0); return 16;
-  case FMT_f41c_d:  assert(false);
-  case FMT_f41c_s:  assert(i == 0);  return 16;
-  case FMT_f52c_d:  assert(i == 0);  return 16;
-  case FMT_f52c_s:  assert(i <= 1);  return 16;
-  case FMT_f5rc:    assert(i == 0);  return 16;
-  case FMT_f57c:    assert(i <= 6);  return 4;
+  case FMT_f00x:
+    not_reached();
+  case FMT_f10x:
+    not_reached();
+  case FMT_f12x:
+    redex_assert(i == 0);
+    return 4;
+  case FMT_f12x_2:
+    redex_assert(i <= 1);
+    return 4;
+  case FMT_f11n:
+    not_reached();
+  case FMT_f11x_d:
+    not_reached();
+  case FMT_f11x_s:
+    redex_assert(i == 0);
+    return 8;
+  case FMT_f10t:
+    not_reached();
+  case FMT_f20t:
+    not_reached();
+  case FMT_f20bc:
+    not_reached();
+  case FMT_f22x:
+    redex_assert(i == 0);
+    return 16;
+  case FMT_f21t:
+    redex_assert(i == 0);
+    return 8;
+  case FMT_f21s:
+    not_reached();
+  case FMT_f21h:
+    not_reached();
+  case FMT_f21c_d:
+    not_reached();
+  case FMT_f21c_s:
+    redex_assert(i == 0);
+    return 8;
+  case FMT_f23x_d:
+    redex_assert(i <= 1);
+    return 8;
+  case FMT_f23x_s:
+    redex_assert(i <= 2);
+    return 8;
+  case FMT_f22b:
+    redex_assert(i == 0);
+    return 8;
+  case FMT_f22t:
+    redex_assert(i <= 1);
+    return 4;
+  case FMT_f22s:
+    redex_assert(i == 0);
+    return 4;
+  case FMT_f22c_d:
+    redex_assert(i == 0);
+    return 4;
+  case FMT_f22c_s:
+    redex_assert(i <= 1);
+    return 4;
+  case FMT_f22cs:
+    not_reached();
+  case FMT_f30t:
+    not_reached();
+  case FMT_f32x:
+    redex_assert(i == 0);
+    return 16;
+  case FMT_f31i:
+    not_reached();
+  case FMT_f31t:
+    redex_assert(i == 0);
+    return 8;
+  case FMT_f31c:
+    not_reached();
+  case FMT_f35c:
+    redex_assert(i <= 4);
+    return 4;
+  case FMT_f3rc:
+    redex_assert(i == 0);
+    return 16;
+  case FMT_f41c_d:
+    not_reached();
+  case FMT_f41c_s:
+    redex_assert(i == 0);
+    return 16;
+  case FMT_f45cc:
+    redex_assert(i <= 4);
+    return 4;
+  case FMT_f4rcc:
+    redex_assert(i == 0);
+    return 16;
+  case FMT_f52c_d:
+    redex_assert(i == 0);
+    return 16;
+  case FMT_f52c_s:
+    redex_assert(i <= 1);
+    return 16;
+  case FMT_f5rc:
+    redex_assert(i == 0);
+    return 16;
+  case FMT_f57c:
+    redex_assert(i <= 6);
+    return 4;
   case FMT_f35ms:
   case FMT_f35mi:
   case FMT_f3rms:
   case FMT_f3rmi:
   case FMT_f51l:
   case FMT_fopcode:
-  case FMT_iopcode: assert(false);
+  case FMT_iopcode:
+    not_reached();
   }
   not_reached();
 }
 
 bit_width_t dest_bit_width(DexOpcode op) {
   switch (dex_opcode::format(op)) {
-  case FMT_f00x:    assert(false);
-  case FMT_f10x:    assert(false);
-  case FMT_f12x:    return 4;
-  case FMT_f12x_2:  return 4;
-  case FMT_f11n:    return 4;
-  case FMT_f11x_d:  return 8;
-  case FMT_f11x_s:  assert(false);
-  case FMT_f10t:    assert(false);
-  case FMT_f20t:    assert(false);
-  case FMT_f20bc:   assert(false);
-  case FMT_f22x:    return 8;
-  case FMT_f21t:    assert(false);
-  case FMT_f21s:    return 8;
-  case FMT_f21h:    return 8;
-  case FMT_f21c_d:  return 8;
-  case FMT_f21c_s:  assert(false);
-  case FMT_f23x_d:  return 8;
-  case FMT_f23x_s:  assert(false);
-  case FMT_f22b:    return 8;
-  case FMT_f22t:    assert(false);
-  case FMT_f22s:    return 4;
-  case FMT_f22c_d:  return 4;
-  case FMT_f22c_s:  assert(false);
-  case FMT_f22cs:   assert(false);
-  case FMT_f30t:    assert(false);
-  case FMT_f32x:    return 16;
-  case FMT_f31i:    return 8;
-  case FMT_f31t:    assert(false);
-  case FMT_f31c:    return 8;
-  case FMT_f35c:    assert(false);
+  case FMT_f00x:
+    not_reached();
+  case FMT_f10x:
+    not_reached();
+  case FMT_f12x:
+    return 4;
+  case FMT_f12x_2:
+    return 4;
+  case FMT_f11n:
+    return 4;
+  case FMT_f11x_d:
+    return 8;
+  case FMT_f11x_s:
+    not_reached();
+  case FMT_f10t:
+    not_reached();
+  case FMT_f20t:
+    not_reached();
+  case FMT_f20bc:
+    not_reached();
+  case FMT_f22x:
+    return 8;
+  case FMT_f21t:
+    not_reached();
+  case FMT_f21s:
+    return 8;
+  case FMT_f21h:
+    return 8;
+  case FMT_f21c_d:
+    return 8;
+  case FMT_f21c_s:
+    not_reached();
+  case FMT_f23x_d:
+    return 8;
+  case FMT_f23x_s:
+    not_reached();
+  case FMT_f22b:
+    return 8;
+  case FMT_f22t:
+    not_reached();
+  case FMT_f22s:
+    return 4;
+  case FMT_f22c_d:
+    return 4;
+  case FMT_f22c_s:
+    not_reached();
+  case FMT_f22cs:
+    not_reached();
+  case FMT_f30t:
+    not_reached();
+  case FMT_f32x:
+    return 16;
+  case FMT_f31i:
+    return 8;
+  case FMT_f31t:
+    not_reached();
+  case FMT_f31c:
+    return 8;
+  case FMT_f35c:
+    not_reached();
   case FMT_f35ms:
   case FMT_f35mi:
   case FMT_f3rc:
   case FMT_f3rms:
-  case FMT_f3rmi:   assert(false);
-  case FMT_f51l:    return 8;
-  case FMT_f41c_d:  return 16;
-  case FMT_f41c_s:  assert(false);
-  case FMT_f52c_d:  return 16;
-  case FMT_f52c_s:  assert(false);
-  case FMT_f5rc:    assert(false);
-  case FMT_f57c:    assert(false);
-  case FMT_fopcode: assert(false);
-  case FMT_iopcode: return 16;
+  case FMT_f3rmi:
+    not_reached();
+  case FMT_f51l:
+    return 8;
+  case FMT_f41c_d:
+    return 16;
+  case FMT_f41c_s:
+  case FMT_f45cc:
+  case FMT_f4rcc:
+    not_reached();
+  case FMT_f52c_d:
+    return 16;
+  case FMT_f52c_s:
+    not_reached();
+  case FMT_f5rc:
+    not_reached();
+  case FMT_f57c:
+    not_reached();
+  case FMT_fopcode:
+    not_reached();
+  case FMT_iopcode:
+    return 16;
   }
   not_reached();
 }
 
-unsigned dests_size(DexOpcode op) {
+bool has_dest(DexOpcode op) {
   switch (dex_opcode::format(op)) {
   case FMT_f00x:
   case FMT_f10x:
@@ -293,11 +399,13 @@ unsigned dests_size(DexOpcode op) {
   case FMT_f35c:
   case FMT_f3rc:
   case FMT_f41c_s:
+  case FMT_f45cc:
+  case FMT_f4rcc:
   case FMT_f52c_s:
   case FMT_f5rc:
   case FMT_f57c:
   case FMT_fopcode:
-    return 0;
+    return false;
   case FMT_f12x:
   case FMT_f12x_2:
   case FMT_f11n:
@@ -317,16 +425,15 @@ unsigned dests_size(DexOpcode op) {
   case FMT_f41c_d:
   case FMT_f52c_d:
   case FMT_iopcode:
-    return 1;
+    return true;
   case FMT_f20bc:
   case FMT_f22cs:
   case FMT_f35ms:
   case FMT_f35mi:
   case FMT_f3rms:
   case FMT_f3rmi:
-    always_assert_log(false, "Unimplemented opcode `%s'", SHOW(op));
+    not_reached_log("Unimplemented opcode `%s'", SHOW(op));
   }
-  not_reached();
 }
 
 unsigned min_srcs_size(DexOpcode op) {
@@ -347,6 +454,7 @@ unsigned min_srcs_size(DexOpcode op) {
   case FMT_f51l:
   case FMT_f5rc:
   case FMT_f41c_d:
+  case FMT_f4rcc:
   case FMT_fopcode:
   case FMT_iopcode:
     return 0;
@@ -372,6 +480,7 @@ unsigned min_srcs_size(DexOpcode op) {
   case FMT_f23x_s:
     return 3;
   case FMT_f35c:
+  case FMT_f45cc:
   case FMT_f57c:
     return 0;
   case FMT_f20bc:
@@ -380,9 +489,8 @@ unsigned min_srcs_size(DexOpcode op) {
   case FMT_f35mi:
   case FMT_f3rms:
   case FMT_f3rmi:
-    always_assert_log(false, "Unimplemented opcode `%s'", SHOW(op));
+    not_reached_log("Unimplemented opcode `%s'", SHOW(op));
   }
-  not_reached();
 }
 
 } // namespace dex_opcode

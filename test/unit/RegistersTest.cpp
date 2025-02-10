@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <gtest/gtest.h>
@@ -18,7 +16,7 @@ static void test_opcode(DexOpcode opcode) {
   DexInstruction insn(opcode);
   const std::string text = std::string("for opcode ") + show(opcode);
   const size_t src_count = insn.srcs_size();
-  const bool has_dest = (insn.dests_size() > 0);
+  const bool has_dest = (insn.has_dest() > 0);
   const int dest_width =
       has_dest ? dex_opcode::dest_bit_width(insn.opcode()) : 0;
   const bool dest_is_src0 = dex_opcode::dest_is_src(insn.opcode());

@@ -1,20 +1,23 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "DexInstruction.h"
 
 #include "Debug.h"
+#include "DexCallSite.h"
 #include "DexIdx.h"
+#include "DexMethodHandle.h"
 #include "DexOutput.h"
+#include "Macros.h"
+#include "Show.h"
 #include "Warning.h"
 
 unsigned DexInstruction::count_from_opcode() const {
+  // clang-format off
   static int args[] = {
       0, /* FMT_f00x   */
       0, /* FMT_f10x   */
@@ -54,12 +57,15 @@ unsigned DexInstruction::count_from_opcode() const {
       4, /* FMT_f51l   */
       1, /* FMT_f41c_d */
       1, /* FMT_f41c_s */
+      1, /* FMT_f45cc  */ // TODO(T59275897)
+      1, /* FMT_f4rcc  */ // TODO(T59275897)
       2, /* FMT_f52c_d */
       2, /* FMT_f52c_s */
       2, /* FMT_f5rc */
       2, /* FMT_f57c */
       0, /* FMT_fopcode   */
   };
+  // clang-format on
   return args[dex_opcode::format(opcode())];
 };
 
@@ -81,9 +87,7 @@ DexInstruction* DexInstruction::set_opcode(DexOpcode op) {
   return this;
 }
 
-unsigned DexInstruction::dests_size() const {
-  return dex_opcode::dests_size(opcode());
-}
+bool DexInstruction::has_dest() const { return dex_opcode::has_dest(opcode()); }
 
 unsigned DexInstruction::srcs_size() const {
   auto format = dex_opcode::format(opcode());
@@ -101,6 +105,7 @@ unsigned DexInstruction::srcs_size() const {
   case FMT_f31i:
   case FMT_f31c:
   case FMT_f3rc:
+  case FMT_f4rcc:
   case FMT_f51l:
   case FMT_f5rc:
   case FMT_f41c_d:
@@ -128,8 +133,15 @@ unsigned DexInstruction::srcs_size() const {
   case FMT_f23x_s:
     return 3;
   case FMT_f35c:
-  case FMT_f57c:
-    return arg_word_count();
+  case FMT_f45cc:
+  case FMT_f57c: {
+    auto count = arg_word_count();
+    always_assert_type_log((format == FMT_f35c && count <= 5) ||
+                               (format == FMT_f45cc && count <= 5) ||
+                               (format == FMT_f57c && count <= 7),
+                           INVALID_DEX, "Invalid src size");
+    return count;
+  }
   case FMT_f20bc:
   case FMT_f22cs:
   case FMT_f35ms:
@@ -137,9 +149,8 @@ unsigned DexInstruction::srcs_size() const {
   case FMT_f3rms:
   case FMT_f3rmi:
   case FMT_iopcode:
-    always_assert_log(false, "Unimplemented opcode `%s'", SHOW(this));
+    not_reached_log("Unimplemented opcode `%s'", SHOW(this));
   }
-  not_reached();
 }
 
 uint16_t DexInstruction::dest() const {
@@ -170,9 +181,8 @@ uint16_t DexInstruction::dest() const {
     return m_arg[0];
   default:
     // All other formats do not define a destination register.
-    always_assert_log(false, "Unhandled opcode: %s", SHOW(opcode()));
+    not_reached_log("Unhandled opcode: %s", SHOW(opcode()));
   }
-  not_reached();
 }
 
 DexInstruction* DexInstruction::set_dest(uint16_t vreg) {
@@ -184,7 +194,7 @@ DexInstruction* DexInstruction::set_dest(uint16_t vreg) {
   case FMT_f22s:
   case FMT_f22c_d:
   case FMT_f22cs:
-    assert((vreg & 0xf) == vreg);
+    redex_assert((vreg & 0xf) == vreg);
     m_opcode = (m_opcode & 0xf0ff) | (vreg << 8);
     return this;
   case FMT_f11x_d:
@@ -197,7 +207,7 @@ DexInstruction* DexInstruction::set_dest(uint16_t vreg) {
   case FMT_f31i:
   case FMT_f31c:
   case FMT_f51l:
-    assert((vreg & 0xff) == vreg);
+    redex_assert((vreg & 0xff) == vreg);
     m_opcode = (m_opcode & 0x00ff) | (vreg << 8);
     return this;
   case FMT_f32x:
@@ -209,9 +219,8 @@ DexInstruction* DexInstruction::set_dest(uint16_t vreg) {
     return this;
   default:
     // All other formats do not define a destination register.
-    always_assert_log(false, "Unhandled opcode: %s", SHOW(this));
+    not_reached_log("Unhandled opcode: %s", SHOW(this));
   }
-  not_reached();
 }
 
 uint16_t DexInstruction::src(int i) const {
@@ -221,43 +230,45 @@ uint16_t DexInstruction::src(int i) const {
   case FMT_f21t:
   case FMT_f21c_s:
   case FMT_f31t:
-    assert(i == 0);
+    redex_assert(i == 0);
     return (m_opcode >> 8) & 0xff;
   case FMT_f12x:
   case FMT_f22s:
   case FMT_f22c_d:
-    assert(i == 0);
+    redex_assert(i == 0);
     return (m_opcode >> 12) & 0xf;
   case FMT_f12x_2:
-    assert(i < 2);
+    redex_assert(i < 2);
     if (i == 0) return (m_opcode >> 8) & 0xf;
     return (m_opcode >> 12) & 0xf;
   case FMT_f22x:
   case FMT_f3rc:
-    assert(i == 0);
+  case FMT_f4rcc:
+    redex_assert(i == 0);
     return m_arg[0];
   case FMT_f23x_d:
-    assert(i < 2);
+    redex_assert(i < 2);
     if (i == 0) return m_arg[0] & 0xff;
     return (m_arg[0] >> 8) & 0xff;
   case FMT_f23x_s:
-    assert(i < 3);
+    redex_assert(i < 3);
     if (i == 0) return (m_opcode >> 8) & 0xff;
     if (i == 1) return m_arg[0] & 0xff;
     return (m_arg[0] >> 8) & 0xff;
   case FMT_f22b:
-    assert(i == 0);
+    redex_assert(i == 0);
     return m_arg[0] & 0xff;
   case FMT_f22t:
   case FMT_f22c_s:
-    assert(i < 2);
+    redex_assert(i < 2);
     if (i == 0) return (m_opcode >> 8) & 0xf;
-    if (i == 1) return (m_opcode >> 12) & 0xf;
+    return (m_opcode >> 12) & 0xf; // i == 1
   case FMT_f32x:
-    assert(i == 0);
+    redex_assert(i == 0);
     return m_arg[1];
   case FMT_f35c:
-    assert(i < 5);
+  case FMT_f45cc:
+    redex_assert(i < 5);
     switch (i) {
     case 0:
       return m_arg[0] & 0xf;
@@ -270,21 +281,22 @@ uint16_t DexInstruction::src(int i) const {
     case 4:
       return (m_opcode >> 8) & 0xf;
     }
+    not_reached();
   case FMT_f41c_s:
-    assert(i == 0);
+    redex_assert(i == 0);
     return m_arg[0];
   case FMT_f52c_d:
-    assert(i == 0);
+    redex_assert(i == 0);
     return m_arg[1];
   case FMT_f52c_s:
-    assert(i <= 1);
+    redex_assert(i <= 1);
     return m_arg[i];
   case FMT_f5rc:
-    assert(i == 0);
+    redex_assert(i == 0);
     return m_arg[1];
   case FMT_f57c:
-    assert(i <= 6);
-    switch(i) {
+    redex_assert(i <= 6);
+    switch (i) {
     case 0:
       return (m_arg[0] >> 4) & 0xf;
     case 1:
@@ -300,11 +312,11 @@ uint16_t DexInstruction::src(int i) const {
     case 6:
       return (m_arg[1] >> 12) & 0xf;
     }
+    not_reached();
   default:
     // All other formats do not define source registers.
-    always_assert_log(false, "Unhandled opcode: %s", SHOW(this));
+    not_reached_log("Unhandled opcode: %s", SHOW(this));
   }
-  not_reached();
 }
 
 DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
@@ -314,20 +326,20 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
   case FMT_f21t:
   case FMT_f21c_s:
   case FMT_f31t:
-    assert(i == 0);
-    assert((vreg & 0xff) == vreg);
+    redex_assert(i == 0);
+    redex_assert((vreg & 0xff) == vreg);
     m_opcode = (m_opcode & 0x00ff) | (vreg << 8);
     return this;
   case FMT_f12x:
   case FMT_f22s:
   case FMT_f22c_d:
-    assert(i == 0);
-    assert((vreg & 0xf) == vreg);
+    redex_assert(i == 0);
+    redex_assert((vreg & 0xf) == vreg);
     m_opcode = (m_opcode & 0x0fff) | (vreg << 12);
     return this;
   case FMT_f12x_2:
-    assert(i < 2);
-    assert((vreg & 0xf) == vreg);
+    redex_assert(i < 2);
+    redex_assert((vreg & 0xf) == vreg);
     if (i == 0) {
       m_opcode = (m_opcode & 0xf0ff) | (vreg << 8);
     } else {
@@ -335,12 +347,12 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
     }
     return this;
   case FMT_f22x:
-    assert(i == 0);
+    redex_assert(i == 0);
     m_arg[0] = vreg;
     return this;
   case FMT_f23x_d:
-    assert(i < 2);
-    assert((vreg & 0xff) == vreg);
+    redex_assert(i < 2);
+    redex_assert((vreg & 0xff) == vreg);
     if (i == 0) {
       m_arg[0] = (m_arg[0] & 0xff00) | vreg;
       return this;
@@ -348,8 +360,8 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
     m_arg[0] = (m_arg[0] & 0x00ff) | (vreg << 8);
     return this;
   case FMT_f23x_s:
-    assert(i < 3);
-    assert((vreg & 0xff) == vreg);
+    redex_assert(i < 3);
+    redex_assert((vreg & 0xff) == vreg);
     if (i == 0) {
       m_opcode = (m_opcode & 0x00ff) | (vreg << 8);
     } else if (i == 1) {
@@ -359,14 +371,14 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
     }
     return this;
   case FMT_f22b:
-    assert(i == 0);
-    assert((vreg & 0xff) == vreg);
+    redex_assert(i == 0);
+    redex_assert((vreg & 0xff) == vreg);
     m_arg[0] = (m_arg[0] & 0xff00) | vreg;
     return this;
   case FMT_f22t:
   case FMT_f22c_s:
-    assert(i < 2);
-    assert((vreg & 0xf) == vreg);
+    redex_assert(i < 2);
+    redex_assert((vreg & 0xf) == vreg);
     if (i == 0) {
       m_opcode = (m_opcode & 0xf0ff) | (vreg << 8);
     } else {
@@ -374,12 +386,13 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
     }
     return this;
   case FMT_f32x:
-    assert(i == 0);
+    redex_assert(i == 0);
     m_arg[1] = vreg;
     return this;
   case FMT_f35c:
-    assert(i < 5);
-    assert((vreg & 0xf) == vreg);
+  case FMT_f45cc:
+    redex_assert(i < 5);
+    redex_assert((vreg & 0xf) == vreg);
     switch (i) {
     case 0:
       m_arg[0] = (m_arg[0] & 0xfff0) | vreg;
@@ -397,21 +410,22 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
       m_opcode = (m_opcode & 0xf0ff) | (vreg << 8);
       return this;
     }
+    not_reached();
   case FMT_f41c_s:
-    assert(i == 0);
+    redex_assert(i == 0);
     m_arg[0] = vreg;
     return this;
   case FMT_f52c_d:
-    assert(i == 0);
+    redex_assert(i == 0);
     m_arg[1] = vreg;
     return this;
   case FMT_f52c_s:
-    assert(i <= 1);
+    redex_assert(i <= 1);
     m_arg[i] = vreg;
     return this;
   case FMT_f57c:
-    assert(i <= 6);
-    assert((vreg & 0xf) == vreg);
+    redex_assert(i <= 6);
+    redex_assert((vreg & 0xf) == vreg);
     switch (i) {
     case 0:
       m_arg[0] = (m_arg[0] & 0xff0f) | (vreg << 4);
@@ -435,11 +449,11 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
       m_arg[0] = (m_arg[1] & 0x0fff) | (vreg << 12);
       return this;
     }
+    not_reached();
   default:
     // All other formats do not define source registers.
-    always_assert_log(false, "Unhandled opcode: %s", SHOW(this));
+    not_reached_log("Unhandled opcode: %s", SHOW(this));
   }
-  not_reached();
 }
 
 DexInstruction* DexInstruction::set_srcs(const std::vector<uint16_t>& vregs) {
@@ -456,7 +470,7 @@ int64_t signext(uint64_t uv) {
 }
 
 int64_t DexInstruction::get_literal() const {
-  assert(dex_opcode::has_literal(opcode()));
+  redex_assert(dex_opcode::has_literal(opcode()));
   auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f11n:
@@ -464,8 +478,8 @@ int64_t DexInstruction::get_literal() const {
   case FMT_f21s:
     return signext<16>(m_arg[0]);
   case FMT_f21h:
-    return signext<16>(m_arg[0])
-           << (opcode() == DOPCODE_CONST_WIDE_HIGH16 ? 48 : 16);
+    return int64_t(uint64_t(signext<16>(m_arg[0]))
+                   << (opcode() == DOPCODE_CONST_WIDE_HIGH16 ? 48 : 16));
   case FMT_f22b:
     return signext<8>(m_arg[0] >> 8);
   case FMT_f22s:
@@ -480,13 +494,12 @@ int64_t DexInstruction::get_literal() const {
     return signext<64>(literal);
   }
   default:
-    assert(false);
+    not_reached();
   }
-  not_reached();
 }
 
 DexInstruction* DexInstruction::set_literal(int64_t literal) {
-  assert(dex_opcode::has_literal(opcode()));
+  redex_assert(dex_opcode::has_literal(opcode()));
   auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f11n:
@@ -499,7 +512,7 @@ DexInstruction* DexInstruction::set_literal(int64_t literal) {
     m_arg[0] = literal >> (opcode() == DOPCODE_CONST_WIDE_HIGH16 ? 48 : 16);
     return this;
   case FMT_f22b:
-    m_arg[0] = (m_arg[0] & 0xFF) | ((literal << 8) & 0xFF00);
+    m_arg[0] = (m_arg[0] & 0xFF) | ((uint64_t(literal) << 8) & 0xFF00);
     return this;
   case FMT_f22s:
     m_arg[0] = literal;
@@ -515,9 +528,8 @@ DexInstruction* DexInstruction::set_literal(int64_t literal) {
     m_arg[3] = literal >> 48;
     return this;
   default:
-    assert(false);
+    not_reached();
   }
-  not_reached();
 }
 
 int32_t DexInstruction::offset() const {
@@ -528,16 +540,15 @@ int32_t DexInstruction::offset() const {
   case FMT_f20t:
   case FMT_f21t:
   case FMT_f22t:
-    return (int32_t) signext<16>(m_arg[0]);
+    return (int32_t)signext<16>(m_arg[0]);
   case FMT_f30t:
   case FMT_f31t: {
     auto offset = uint32_t(m_arg[0]) | (uint32_t(m_arg[1]) << 16);
-    return  (int32_t) signext<32>(offset);
+    return (int32_t)signext<32>(offset);
   }
   default:
-    assert(false);
+    not_reached();
   }
-  not_reached();
 }
 
 DexInstruction* DexInstruction::set_offset(int32_t offset) {
@@ -565,14 +576,13 @@ DexInstruction* DexInstruction::set_offset(int32_t offset) {
     m_arg[1] = offset >> 16;
     return this;
   default:
-    assert(false);
+    not_reached();
   }
-  not_reached();
 }
 
 uint16_t DexInstruction::range_base() const {
   auto format = dex_opcode::format(opcode());
-  assert(format == FMT_f3rc || format == FMT_f5rc);
+  redex_assert(format == FMT_f3rc || format == FMT_f4rcc || format == FMT_f5rc);
   if (format == FMT_f5rc) {
     return m_arg[1];
   }
@@ -581,14 +591,14 @@ uint16_t DexInstruction::range_base() const {
 
 uint16_t DexInstruction::range_size() const {
   auto format = dex_opcode::format(opcode());
-  assert(format == FMT_f3rc || format == FMT_f5rc);
+  redex_assert(format == FMT_f3rc || format == FMT_f4rcc || format == FMT_f5rc);
   if (format == FMT_f5rc) return m_arg[0];
   return (m_opcode >> 8) & 0xff;
 }
 
 DexInstruction* DexInstruction::set_range_base(uint16_t base) {
   auto format = dex_opcode::format(opcode());
-  assert(format == FMT_f3rc || format == FMT_f5rc);
+  redex_assert(format == FMT_f3rc || format == FMT_f4rcc || format == FMT_f5rc);
   if (format == FMT_f5rc) {
     m_arg[1] = base;
   } else {
@@ -599,11 +609,11 @@ DexInstruction* DexInstruction::set_range_base(uint16_t base) {
 
 DexInstruction* DexInstruction::set_range_size(uint16_t size) {
   auto format = dex_opcode::format(opcode());
-  assert(format == FMT_f3rc || format == FMT_f5rc);
+  redex_assert(format == FMT_f3rc || format == FMT_f4rcc || format == FMT_f5rc);
   if (format == FMT_f5rc) {
     m_arg[0] = size;
   } else {
-    assert(size == (size & 0xff));
+    redex_assert(size == (size & 0xff));
     m_opcode = (m_opcode & 0xff) | (size << 8);
   }
   return this;
@@ -611,7 +621,7 @@ DexInstruction* DexInstruction::set_range_size(uint16_t size) {
 
 uint16_t DexInstruction::arg_word_count() const {
   auto format = dex_opcode::format(opcode());
-  assert(format == FMT_f35c || format == FMT_f57c);
+  redex_assert(format == FMT_f35c || format == FMT_f45cc || format == FMT_f57c);
   if (format == FMT_f57c) {
     return (m_arg[0]) & 0xf;
   }
@@ -620,8 +630,8 @@ uint16_t DexInstruction::arg_word_count() const {
 
 DexInstruction* DexInstruction::set_arg_word_count(uint16_t count) {
   auto format = dex_opcode::format(opcode());
-  assert(format == FMT_f35c || format == FMT_f57c);
-  assert((count & 0xf) == count);
+  redex_assert(format == FMT_f35c || format == FMT_f45cc || format == FMT_f57c);
+  redex_assert((count & 0xf) == count);
   if (format == FMT_f57c) {
     m_arg[0] = (m_arg[0] & 0xfff0) | count;
   } else {
@@ -630,45 +640,15 @@ DexInstruction* DexInstruction::set_arg_word_count(uint16_t count) {
   return this;
 }
 
-void DexInstruction::verify_encoding() const {
-  auto test = m_count ? new DexInstruction(opcode()) : new DexInstruction(opcode(), 0);
-  if (dests_size()) {
-    test->set_dest(dest());
-  }
-  for (unsigned i = 0; i < srcs_size(); i++) {
-    test->set_src(i, src(i));
-  }
-  auto op = opcode();
-  if (dex_opcode::has_range(op)) {
-    test->set_range_base(range_base());
-    test->set_range_size(range_size());
-  }
-  if (dex_opcode::has_arg_word_count(opcode()))
-    test->set_arg_word_count(arg_word_count());
-  if (dex_opcode::has_literal(op)) test->set_literal(get_literal());
-  if (dex_opcode::has_offset(op)) test->set_offset(offset());
-
-  assert_log(m_opcode == test->m_opcode, "%x %x\n", m_opcode, test->m_opcode);
-  for (unsigned i = 0; i < m_count; i++) {
-    assert_log(m_arg[i] == test->m_arg[i],
-               "(%x %x) (%x %x)",
-               m_opcode,
-               m_arg[i],
-               test->m_opcode,
-               test->m_arg[i]);
-  }
-
-  delete test;
-}
-
-void DexOpcodeString::gather_strings(std::vector<DexString*>& lstring) const {
+void DexOpcodeString::gather_strings(
+    std::vector<const DexString*>& lstring) const {
   lstring.push_back(m_string);
 }
 
-uint16_t DexOpcodeString::size() const { return jumbo() ? 3 : 2; }
+size_t DexOpcodeString::size() const { return jumbo() ? 3 : 2; }
 
-void DexOpcodeString::encode(DexOutputIdx* dodx, uint16_t*& insns) {
-  encode_opcode(dodx, insns);
+void DexOpcodeString::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
+  encode_opcode(insns);
   uint32_t sidx = dodx->stringidx(m_string);
   uint16_t idx = (uint16_t)sidx;
   if (!jumbo()) {
@@ -686,14 +666,14 @@ void DexOpcodeString::encode(DexOutputIdx* dodx, uint16_t*& insns) {
   *insns++ = idx;
 }
 
-uint16_t DexOpcodeType::size() const { return m_count + 2; }
+size_t DexOpcodeType::size() const { return m_count + 2; }
 
 void DexOpcodeType::gather_types(std::vector<DexType*>& ltype) const {
   ltype.push_back(m_type);
 }
 
-void DexOpcodeType::encode(DexOutputIdx* dodx, uint16_t*& insns) {
-  encode_opcode(dodx, insns);
+void DexOpcodeType::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
+  encode_opcode(insns);
   uint16_t idx = dodx->typeidx(m_type);
   *insns++ = idx;
   encode_args(insns);
@@ -703,10 +683,10 @@ void DexOpcodeField::gather_fields(std::vector<DexFieldRef*>& lfield) const {
   lfield.push_back(m_field);
 }
 
-uint16_t DexOpcodeField::size() const { return 2; }
+size_t DexOpcodeField::size() const { return 2; }
 
-void DexOpcodeField::encode(DexOutputIdx* dodx, uint16_t*& insns) {
-  encode_opcode(dodx, insns);
+void DexOpcodeField::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
+  encode_opcode(insns);
   uint16_t idx = dodx->fieldidx(m_field);
   *insns++ = idx;
 }
@@ -716,32 +696,105 @@ void DexOpcodeMethod::gather_methods(
   lmethod.push_back(m_method);
 }
 
-uint16_t DexOpcodeMethod::size() const { return 3; }
+size_t DexOpcodeMethod::size() const { return 3; }
 
-void DexOpcodeMethod::encode(DexOutputIdx* dodx, uint16_t*& insns) {
-  encode_opcode(dodx, insns);
+void DexOpcodeMethod::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
+  encode_opcode(insns);
   uint16_t idx = dodx->methodidx(m_method);
   *insns++ = idx;
   encode_args(insns);
 }
 
-uint16_t DexOpcodeData::size() const { return m_data_count + 1; }
+size_t DexOpcodeCallSite::size() const { return 3; }
 
-void DexOpcodeData::encode(DexOutputIdx* dodx, uint16_t*& insns) {
-  encode_opcode(dodx, insns);
-  memcpy(insns, m_data, m_data_count * sizeof(uint16_t));
-  insns += m_data_count;
-}
-
-void DexInstruction::encode(DexOutputIdx* dodx, uint16_t*& insns) {
-  encode_opcode(dodx, insns);
+void DexOpcodeCallSite::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
+  encode_opcode(insns);
+  uint16_t idx = dodx->callsiteidx(m_callsite);
+  *insns++ = idx;
   encode_args(insns);
 }
 
-uint16_t DexInstruction::size() const { return m_count + 1; }
+void DexOpcodeCallSite::gather_callsites(
+    std::vector<DexCallSite*>& lcallsite) const {
+  lcallsite.emplace_back(m_callsite);
+}
+
+void DexOpcodeCallSite::gather_strings(
+    std::vector<const DexString*>& lstring) const {
+  m_callsite->gather_strings(lstring);
+}
+
+void DexOpcodeCallSite::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  m_callsite->gather_methodhandles(lmethodhandle);
+}
+
+void DexOpcodeCallSite::gather_methods(
+    std::vector<DexMethodRef*>& lmethod) const {
+  m_callsite->gather_methods(lmethod);
+}
+
+void DexOpcodeCallSite::gather_fields(std::vector<DexFieldRef*>& lfield) const {
+  m_callsite->gather_fields(lfield);
+}
+
+size_t DexOpcodeMethodHandle::size() const { return 3; }
+
+void DexOpcodeMethodHandle::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
+  encode_opcode(insns);
+  uint16_t idx = dodx->methodhandleidx(m_methodhandle);
+  *insns++ = idx;
+  encode_args(insns);
+}
+
+void DexOpcodeMethodHandle::gather_methods(
+    std::vector<DexMethodRef*>& lmethod) const {
+  m_methodhandle->gather_methods(lmethod);
+}
+
+void DexOpcodeMethodHandle::gather_fields(
+    std::vector<DexFieldRef*>& lfield) const {
+  m_methodhandle->gather_fields(lfield);
+}
+
+void DexOpcodeMethodHandle::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  lmethodhandle.push_back(m_methodhandle);
+}
+
+size_t DexOpcodeData::size() const { return m_data_count + 1; }
+
+void DexOpcodeData::encode(DexOutputIdx* /* unused */, uint16_t*& insns) const {
+  encode_opcode(insns);
+  memcpy(insns, m_data.get(), m_data_count * sizeof(uint16_t));
+  insns += m_data_count;
+}
+
+size_t DexOpcodeProto::size() const { return 3; }
+
+void DexOpcodeProto::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
+  encode_opcode(insns);
+  uint16_t idx = dodx->protoidx(m_proto);
+  *insns++ = idx;
+  encode_args(insns);
+}
+
+void DexOpcodeProto::gather_strings(
+    std::vector<const DexString*>& lstring) const {
+  m_proto->gather_strings(lstring);
+}
+
+void DexInstruction::encode(DexOutputIdx* /* unused */,
+                            uint16_t*& insns) const {
+  encode_opcode(insns);
+  encode_args(insns);
+}
+
+size_t DexInstruction::size() const { return m_count + 1; }
 
 DexInstruction* DexInstruction::make_instruction(DexIdx* idx,
-                                                 const uint16_t** insns_ptr) {
+                                                 const uint16_t** insns_ptr,
+                                                 const uint16_t* end) {
   auto& insns = *insns_ptr;
   auto fopcode = static_cast<DexOpcode>(*insns++);
   DexOpcode opcode = static_cast<DexOpcode>(fopcode & 0xff);
@@ -749,21 +802,34 @@ DexInstruction* DexInstruction::make_instruction(DexIdx* idx,
   case DOPCODE_NOP: {
     if (fopcode == FOPCODE_PACKED_SWITCH) {
       int count = (*insns--) * 2 + 4;
+      always_assert_type_log(count >= 0, RedexError::INVALID_DEX,
+                             "Negative count");
       insns += count;
+      always_assert_type_log(insns <= end, RedexError::INVALID_DEX, "Overflow");
       return new DexOpcodeData(insns - count, count - 1);
     } else if (fopcode == FOPCODE_SPARSE_SWITCH) {
       int count = (*insns--) * 4 + 2;
+      always_assert_type_log(count >= 0, RedexError::INVALID_DEX,
+                             "Negative count");
       insns += count;
+      always_assert_type_log(insns <= end, RedexError::INVALID_DEX, "Overflow");
       return new DexOpcodeData(insns - count, count - 1);
     } else if (fopcode == FOPCODE_FILLED_ARRAY) {
       uint16_t ewidth = *insns++;
       uint32_t size = *((uint32_t*)insns);
       int count = (ewidth * size + 1) / 2 + 4;
+      always_assert_type_log(count >= 0, RedexError::INVALID_DEX,
+                             "Negative count");
       insns += count - 2;
+      always_assert_type_log(insns <= end, RedexError::INVALID_DEX, "Overflow");
       return new DexOpcodeData(insns - count, count - 1);
     }
   }
-  /* Format 10, fall through for NOP */
+    /* Format 10, fall through for NOP */
+    // While nops allow any upper byte (except the ones above), we do not want
+    // to distinguish that.
+    fopcode = DexOpcode::DOPCODE_NOP;
+    FALLTHROUGH_INTENDED;
   case DOPCODE_MOVE:
   case DOPCODE_MOVE_WIDE:
   case DOPCODE_MOVE_OBJECT:
@@ -997,16 +1063,32 @@ DexInstruction* DexInstruction::make_instruction(DexIdx* idx,
     DexMethodRef* meth = idx->get_methodidx(midx);
     return new DexOpcodeMethod(fopcode, meth, arg);
   }
+  /* MethodHandle: */
+  case DOPCODE_INVOKE_POLYMORPHIC:
+  case DOPCODE_INVOKE_POLYMORPHIC_RANGE: {
+    uint16_t csidx = *insns++;
+    uint16_t arg = *insns++;
+    DexMethodRef* meth = idx->get_methodidx(csidx);
+    return new DexOpcodeMethod(fopcode, meth, arg);
+  }
+  /* CallSite: */
+  case DOPCODE_INVOKE_CUSTOM:
+  case DOPCODE_INVOKE_CUSTOM_RANGE: {
+    uint16_t csidx = *insns++;
+    uint16_t arg = *insns++;
+    DexCallSite* callsite = idx->get_callsiteidx(csidx);
+    return new DexOpcodeCallSite(fopcode, callsite, arg);
+  }
   /* StringRef: */
   case DOPCODE_CONST_STRING: {
     uint16_t sidx = *insns++;
-    DexString* str = idx->get_stringidx(sidx);
+    auto str = idx->get_stringidx(sidx);
     return new DexOpcodeString(fopcode, str);
   }
   case DOPCODE_CONST_STRING_JUMBO: {
     uint32_t sidx = *insns++;
     sidx |= (*insns++) << 16;
-    DexString* str = idx->get_stringidx(sidx);
+    auto str = idx->get_stringidx(sidx);
     return new DexOpcodeString(fopcode, str);
   }
   case DOPCODE_CONST_CLASS:
@@ -1024,6 +1106,16 @@ DexInstruction* DexInstruction::make_instruction(DexIdx* idx,
     uint16_t arg = *insns++;
     DexType* type = idx->get_typeidx(tidx);
     return new DexOpcodeType(fopcode, type, arg);
+  }
+  case DOPCODE_CONST_METHOD_HANDLE: {
+    uint16_t tidx = *insns++;
+    DexMethodHandle* methhandle = idx->get_methodhandleidx(tidx);
+    return new DexOpcodeMethodHandle(fopcode, methhandle);
+  }
+  case DOPCODE_CONST_METHOD_TYPE: {
+    uint16_t tidx = *insns++;
+    DexProto* proto = idx->get_protoidx(tidx);
+    return new DexOpcodeProto(fopcode, proto);
   }
   default:
     fprintf(stderr, "Unknown opcode %02x\n", opcode);
@@ -1069,11 +1161,15 @@ DexInstruction* DexInstruction::make_instruction(DexOpcode op) {
   case DOPCODE_INVOKE_DIRECT:
   case DOPCODE_INVOKE_STATIC:
   case DOPCODE_INVOKE_INTERFACE:
+  case DOPCODE_INVOKE_CUSTOM:
+  case DOPCODE_INVOKE_POLYMORPHIC:
   case DOPCODE_INVOKE_VIRTUAL_RANGE:
   case DOPCODE_INVOKE_SUPER_RANGE:
   case DOPCODE_INVOKE_DIRECT_RANGE:
   case DOPCODE_INVOKE_STATIC_RANGE:
   case DOPCODE_INVOKE_INTERFACE_RANGE:
+  case DOPCODE_INVOKE_CUSTOM_RANGE:
+  case DOPCODE_INVOKE_POLYMORPHIC_RANGE:
     return new DexOpcodeMethod(op, nullptr);
   /* StringRef: */
   case DOPCODE_CONST_STRING:
@@ -1087,14 +1183,17 @@ DexInstruction* DexInstruction::make_instruction(DexOpcode op) {
   case DOPCODE_FILLED_NEW_ARRAY:
   case DOPCODE_FILLED_NEW_ARRAY_RANGE:
     return new DexOpcodeType(op, nullptr);
+  case DOPCODE_CONST_METHOD_HANDLE:
+    return new DexOpcodeMethodHandle(op, nullptr);
+  case DOPCODE_CONST_METHOD_TYPE:
+    return new DexOpcodeProto(op, nullptr);
   default:
     return new DexInstruction(op);
   }
 }
 
 bool DexInstruction::operator==(const DexInstruction& that) const {
-  if (m_ref_type != that.m_ref_type ||
-      m_opcode != that.m_opcode ||
+  if (m_ref_type != that.m_ref_type || m_opcode != that.m_opcode ||
       m_count != that.m_count) {
     return false;
   }
@@ -1125,6 +1224,21 @@ bool DexInstruction::operator==(const DexInstruction& that) const {
     auto this_ = static_cast<const DexOpcodeMethod*>(this);
     auto that_ = static_cast<const DexOpcodeMethod*>(&that);
     return this_->get_method() == that_->get_method();
+  }
+  case REF_CALLSITE: {
+    auto this_ = static_cast<const DexOpcodeCallSite*>(this);
+    auto that_ = static_cast<const DexOpcodeCallSite*>(&that);
+    return this_->get_callsite() == that_->get_callsite();
+  }
+  case REF_METHODHANDLE: {
+    auto this_ = static_cast<const DexOpcodeMethodHandle*>(this);
+    auto that_ = static_cast<const DexOpcodeMethodHandle*>(&that);
+    return this_->get_methodhandle() == that_->get_methodhandle();
+  }
+  case REF_PROTO: {
+    auto this_ = static_cast<const DexOpcodeProto*>(this);
+    auto that_ = static_cast<const DexOpcodeProto*>(&that);
+    return this_->get_proto() == that_->get_proto();
   }
   }
 }

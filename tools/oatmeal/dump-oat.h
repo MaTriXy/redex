@@ -1,19 +1,18 @@
-/**
- * Copyright (c) 2017-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include "OatmealUtil.h"
 #include "DexDefs.h"
+#include "OatmealUtil.h"
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 constexpr uint32_t kOatMagicNum = 0x0a74616F;
@@ -44,7 +43,9 @@ struct DexInput {
 struct OatDexFile {
   OatDexFile() = default;
   OatDexFile(std::string location_, uint32_t file_offset_, uint32_t file_size_)
-      : location(location_), file_offset(file_offset_), file_size(file_size_) {}
+      : location(std::move(location_)),
+        file_offset(file_offset_),
+        file_size(file_size_) {}
 
   std::string location;
   uint32_t file_offset;
@@ -68,6 +69,7 @@ class OatFile {
   OatFile() = default;
 
   UNCOPYABLE(OatFile);
+  MOVABLE(OatFile);
   virtual ~OatFile();
 
   // Reads magic number, returns correct oat file implementation.
@@ -131,15 +133,12 @@ struct ArchStrings {
   const char* s;
 };
 
-constexpr ArchStrings arch_strings[] = {{InstructionSet::kNone, "NONE"},
-                                        {InstructionSet::kArm, "arm"},
-                                        {InstructionSet::kArm64, "arm64"},
-                                        {InstructionSet::kThumb2, "thumb2"},
-                                        {InstructionSet::kX86, "x86"},
-                                        {InstructionSet::kX86_64, "x86_64"},
-                                        {InstructionSet::kMips, "mips"},
-                                        {InstructionSet::kMips64, "mips64"},
-                                        {InstructionSet::kMax, nullptr}};
+constexpr ArchStrings arch_strings[] = {
+    {InstructionSet::kNone, "NONE"},   {InstructionSet::kArm, "arm"},
+    {InstructionSet::kArm64, "arm64"}, {InstructionSet::kThumb2, "thumb2"},
+    {InstructionSet::kX86, "x86"},     {InstructionSet::kX86_64, "x86_64"},
+    {InstructionSet::kMips, "mips"},   {InstructionSet::kMips64, "mips64"},
+    {InstructionSet::kMax, nullptr}};
 
 inline const char* instruction_set_str(InstructionSet isa) {
   int i = 0;

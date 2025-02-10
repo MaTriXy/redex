@@ -1,20 +1,22 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "DexAsm.h"
-#include "LocalDce.h"
+#include "DexUtil.h"
 #include "IRCode.h"
+#include "LocalDce.h"
+#include "Purity.h"
 #include "TestGenerator.h"
 
 class DceTest : public EquivalenceTest {
-  virtual void transform_method(DexMethod* m) {
-    LocalDcePass::run(m);
+  void transform_method(DexMethod* m) override {
+    const std::unordered_set<DexMethodRef*> pure_methods = get_pure_methods();
+    LocalDce(/* init_classes_with_side_effects */ nullptr, pure_methods)
+        .dce(m->get_code());
   }
 };
 

@@ -1,16 +1,15 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "ScopeHelper.h"
 
-#include "Creators.h"
+#include <utility>
 
+#include "Creators.h"
 
 namespace {
 
@@ -18,7 +17,7 @@ namespace {
  * Build a DexClass for java.lang.Object
  */
 DexClass* create_java_lang_object() {
-  auto obj_t = get_object_type();
+  auto obj_t = type::java_lang_Object();
   auto obj_cls = type_class(obj_t);
   if (obj_cls != nullptr) return obj_cls;
 
@@ -43,18 +42,19 @@ DexClass* create_java_lang_object() {
 
   // required sigs
   auto void_args = DexTypeList::make_type_list({});
-  auto void_object = DexProto::make_proto(get_object_type(), void_args);
+  auto void_object = DexProto::make_proto(type::java_lang_Object(), void_args);
   auto object_bool = DexProto::make_proto(
-      get_boolean_type(), DexTypeList::make_type_list({get_object_type()}));
-  auto void_void = DexProto::make_proto(get_void_type(), void_args);
-  auto void_class = DexProto::make_proto(get_class_type(), void_args);
-  auto void_int = DexProto::make_proto(get_int_type(), void_args);
-  auto void_string = DexProto::make_proto(get_string_type(), void_args);
+      type::_boolean(),
+      DexTypeList::make_type_list({type::java_lang_Object()}));
+  auto void_void = DexProto::make_proto(type::_void(), void_args);
+  auto void_class = DexProto::make_proto(type::java_lang_Class(), void_args);
+  auto void_int = DexProto::make_proto(type::_int(), void_args);
+  auto void_string = DexProto::make_proto(type::java_lang_String(), void_args);
   auto long_void = DexProto::make_proto(
-      get_void_type(), DexTypeList::make_type_list({get_int_type()}));
+      type::_void(), DexTypeList::make_type_list({type::_int()}));
   auto long_int_void = DexProto::make_proto(
-      get_void_type(),
-      DexTypeList::make_type_list({get_long_type(), get_int_type()}));
+      type::_void(),
+      DexTypeList::make_type_list({type::_long(), type::_int()}));
 
   // required names
   auto clone = DexString::make_string("clone");
@@ -83,16 +83,12 @@ DexClass* create_java_lang_object() {
   method->set_external();
   obj_cls->add_method(method);
 
+  // protected java.lang.Object.finalize()V
   method = static_cast<DexMethod*>(
-      DexMethod::get_method(obj_t, finalize, void_void));
-  if (method == nullptr) {
-    // protected java.lang.Object.finalize()V
-    method = static_cast<DexMethod*>(
-        DexMethod::make_method(obj_t, finalize, void_void));
-    method->set_access(ACC_PROTECTED);
-    method->set_virtual(true);
-    method->set_external();
-  }
+      DexMethod::make_method(obj_t, finalize, void_void));
+  method->set_access(ACC_PROTECTED);
+  method->set_virtual(true);
+  method->set_external();
   obj_cls->add_method(method);
 
   method = static_cast<DexMethod*>(
@@ -107,8 +103,8 @@ DexClass* create_java_lang_object() {
   }
   obj_cls->add_method(method);
 
-  method = static_cast<DexMethod*>(
-      DexMethod::get_method(obj_t, hashCode, void_int));
+  method =
+      static_cast<DexMethod*>(DexMethod::get_method(obj_t, hashCode, void_int));
   if (method == nullptr) {
     // public native java.lang.Object.hashCode()I
     method = static_cast<DexMethod*>(
@@ -119,8 +115,8 @@ DexClass* create_java_lang_object() {
   }
   obj_cls->add_method(method);
 
-  method = static_cast<DexMethod*>(
-      DexMethod::get_method(obj_t, notify, void_void));
+  method =
+      static_cast<DexMethod*>(DexMethod::get_method(obj_t, notify, void_void));
   if (method == nullptr) {
     // public final native java.lang.Object.notify()V
     method = static_cast<DexMethod*>(
@@ -155,24 +151,24 @@ DexClass* create_java_lang_object() {
   }
   obj_cls->add_method(method);
 
-  method = static_cast<DexMethod*>(
-      DexMethod::get_method(obj_t, wait, void_void));
+  method =
+      static_cast<DexMethod*>(DexMethod::get_method(obj_t, wait, void_void));
   if (method == nullptr) {
     // public final java.lang.Object.wait()V
-    method = static_cast<DexMethod*>(
-        DexMethod::make_method(obj_t, wait, void_void));
+    method =
+        static_cast<DexMethod*>(DexMethod::make_method(obj_t, wait, void_void));
     method->set_access(ACC_PUBLIC | ACC_FINAL);
     method->set_virtual(true);
     method->set_external();
   }
   obj_cls->add_method(method);
 
-  method = static_cast<DexMethod*>(
-      DexMethod::get_method(obj_t, wait, long_void));
+  method =
+      static_cast<DexMethod*>(DexMethod::get_method(obj_t, wait, long_void));
   if (method == nullptr) {
     // public final java.lang.Object.wait(J)V
-    method = static_cast<DexMethod*>(
-        DexMethod::make_method(obj_t, wait, long_void));
+    method =
+        static_cast<DexMethod*>(DexMethod::make_method(obj_t, wait, long_void));
     method->set_access(ACC_PUBLIC | ACC_FINAL);
     method->set_virtual(true);
     method->set_external();
@@ -194,20 +190,22 @@ DexClass* create_java_lang_object() {
   return obj_cls;
 }
 
-DexClass* create_class(DexType* type, DexType* super,
-    std::vector<DexType*> interfaces, DexAccessFlags access,
-    bool external = false) {
+} // namespace
+
+DexClass* create_class(DexType* type,
+                       DexType* super,
+                       const std::vector<DexType*>& interfaces,
+                       DexAccessFlags access,
+                       bool external) {
   ClassCreator creator(type);
   creator.set_access(access);
   if (external) creator.set_external();
-  if (super == nullptr) super = get_object_type();
+  if (super == nullptr) super = type::java_lang_Object();
   creator.set_super(super);
   for (const auto& interface : interfaces) {
     creator.add_interface(interface);
   }
   return creator.create();
-}
-
 }
 
 Scope create_empty_scope() {
@@ -216,27 +214,24 @@ Scope create_empty_scope() {
   return scope;
 }
 
-DexClass* create_internal_class(
-    DexType* type,
-    DexType* super,
-    std::vector<DexType*> interfaces,
-    DexAccessFlags access /*= ACC_PUBLIC*/) {
+DexClass* create_internal_class(DexType* type,
+                                DexType* super,
+                                const std::vector<DexType*>& interfaces,
+                                DexAccessFlags access /*= ACC_PUBLIC*/) {
   return create_class(type, super, interfaces, access, false);
 }
 
-DexClass* create_external_class(
-    DexType* type,
-    DexType* super,
-    std::vector<DexType*> interfaces,
-    DexAccessFlags access /*= ACC_PUBLIC*/) {
+DexClass* create_external_class(DexType* type,
+                                DexType* super,
+                                const std::vector<DexType*>& interfaces,
+                                DexAccessFlags access /*= ACC_PUBLIC*/) {
   return create_class(type, super, interfaces, access, true);
 }
 
-DexMethod* create_abstract_method(
-    DexClass* cls,
-    const char* name,
-    DexProto* proto,
-    DexAccessFlags access /*= ACC_PUBLIC*/) {
+DexMethod* create_abstract_method(DexClass* cls,
+                                  const char* name,
+                                  DexProto* proto,
+                                  DexAccessFlags access /*= ACC_PUBLIC*/) {
   access = access | ACC_ABSTRACT;
   auto method = static_cast<DexMethod*>(DexMethod::make_method(
       cls->get_type(), DexString::make_string(name), proto));
@@ -245,22 +240,36 @@ DexMethod* create_abstract_method(
   return method;
 }
 
-DexMethod* create_empty_method(
-    DexClass* cls,
-    const char* name,
-    DexProto* proto,
-    DexAccessFlags access /*= ACC_PUBLIC*/) {
-  MethodCreator mcreator(cls->get_type(),
-      DexString::make_string(name), proto, access);
+DexMethod* create_empty_method(DexClass* cls,
+                               const char* name,
+                               DexProto* proto,
+                               DexAccessFlags access /*= ACC_PUBLIC*/) {
+  MethodCreator mcreator(cls->get_type(), DexString::make_string(name), proto,
+                         access);
   auto main_block = mcreator.get_main_block();
   auto rtype = proto->get_rtype();
-  if (rtype == get_void_type()) {
+  if (rtype == type::_void()) {
     main_block->ret_void();
   } else {
     auto null_loc = mcreator.make_local(rtype);
     main_block->load_null(null_loc);
     main_block->ret(null_loc);
   }
+  auto method = mcreator.create();
+  cls->add_method(method);
+  return method;
+}
+
+DexMethod* create_throwing_method(DexClass* cls,
+                                  const char* name,
+                                  DexProto* proto,
+                                  DexAccessFlags access /*= ACC_PUBLIC*/) {
+  MethodCreator mcreator(cls->get_type(), DexString::make_string(name), proto,
+                         access);
+  auto main_block = mcreator.get_main_block();
+  auto null_loc = mcreator.make_local(type::java_lang_Object());
+  main_block->load_null(null_loc);
+  main_block->throwex(null_loc);
   auto method = mcreator.create();
   cls->add_method(method);
   return method;

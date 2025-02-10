@@ -1,20 +1,17 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #pragma once
 
-#include <boost/functional/hash.hpp>
+#include <sparta/FiniteAbstractDomain.h>
+#include <sparta/PatriciaTreeMapAbstractEnvironment.h>
+#include <sparta/ReducedProductAbstractDomain.h>
 
 #include "DexClass.h"
-#include "FiniteAbstractDomain.h"
-#include "PatriciaTreeMapAbstractEnvironment.h"
-#include "ReducedProductAbstractDomain.h"
 
 /*
  * ObjectDomain is an abstract environment coupled with logic that tracks
@@ -26,19 +23,20 @@
 
 enum class EscapeState {
   MAY_ESCAPE,
+  // An object which escapes iff its originating parameter does
+  ONLY_PARAMETER_DEPENDENT,
   NOT_ESCAPED,
   BOTTOM,
 };
 
 namespace escape_domain_impl {
 
-using Lattice = BitVectorLattice<EscapeState,
-                                 /* cardinality */ 3,
-                                 boost::hash<EscapeState>>;
+using Lattice = sparta::BitVectorLattice<EscapeState,
+                                         /* kCardinality */ 4>;
 
 extern Lattice lattice;
 
-using Domain =
+using Domain = sparta::
     FiniteAbstractDomain<EscapeState, Lattice, Lattice::Encoding, &lattice>;
 
 } // namespace escape_domain_impl
@@ -49,18 +47,19 @@ std::ostream& operator<<(std::ostream& os, const EscapeDomain& dom);
 
 template <typename FieldValue>
 class ObjectDomain final
-    : public ReducedProductAbstractDomain<
+    : public sparta::ReducedProductAbstractDomain<
           ObjectDomain<FieldValue>,
           EscapeDomain,
-          PatriciaTreeMapAbstractEnvironment<const DexField*, FieldValue>> {
+          sparta::PatriciaTreeMapAbstractEnvironment<const DexField*,
+                                                     FieldValue>> {
 
  public:
   using FieldEnvironment =
-      PatriciaTreeMapAbstractEnvironment<const DexField*, FieldValue>;
+      sparta::PatriciaTreeMapAbstractEnvironment<const DexField*, FieldValue>;
 
-  using Base = ReducedProductAbstractDomain<ObjectDomain<FieldValue>,
-                                            EscapeDomain,
-                                            FieldEnvironment>;
+  using Base = sparta::ReducedProductAbstractDomain<ObjectDomain<FieldValue>,
+                                                    EscapeDomain,
+                                                    FieldEnvironment>;
 
   using Base::Base;
 

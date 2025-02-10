@@ -1,10 +1,8 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include "DexOpcodeDefs.h"
@@ -13,23 +11,27 @@
 #include <stdexcept>
 
 std::string print(DexOpcode opcode) {
-   switch (opcode) {
- #define OP(op, code, fmt, literal) \
-   case DOPCODE_##op:               \
-     return #literal;
-     DOPS
-     QDOPS
- #undef OP
-   case FOPCODE_PACKED_SWITCH:
-     return "PACKED_SWITCH_DATA";
-   case FOPCODE_SPARSE_SWITCH:
-     return "SPARSE_SWITCH_DATA";
-   case FOPCODE_FILLED_ARRAY:
-     return "FILLED_ARRAY_DATA";
-   default:
-     return "NO_VALID_OPCODE";
-   }
- }
+  /* clang-format off */
+
+  switch (opcode) {
+#define OP(op, code, fmt, literal) \
+  case DOPCODE_##op:               \
+    return #literal;
+    DOPS QDOPS
+#undef OP
+
+  case FOPCODE_PACKED_SWITCH:
+    return "PACKED_SWITCH_DATA";
+  case FOPCODE_SPARSE_SWITCH:
+    return "SPARSE_SWITCH_DATA";
+  case FOPCODE_FILLED_ARRAY:
+    return "FILLED_ARRAY_DATA";
+  default:
+    return "NO_VALID_OPCODE";
+  }
+
+  /* clang-format on */
+}
 
 DexOpcode quicken(DexOpcode opcode) {
   switch (opcode) {
@@ -66,6 +68,9 @@ DexOpcode quicken(DexOpcode opcode) {
     return DOPCODE_IPUT_SHORT_QUICK;
 
   default:
-    throw std::invalid_argument("Can't quicken opcode.");
+    std::ostringstream msg;
+    msg << std::string("Can't quicken opcode: ") << std::hex
+        << (uint16_t)opcode;
+    throw std::invalid_argument(msg.str());
   }
 }
